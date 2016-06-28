@@ -4791,10 +4791,10 @@ enum skl_disp_power_wells {
 #define   PIPE_PIXEL_MASK         0x00ffffff
 #define   PIPE_PIXEL_SHIFT        0
 /* GM45+ just has to be different */
-#define _PIPEA_FRMCOUNT_GM45	0x70040
-#define _PIPEA_FLIPCOUNT_GM45	0x70044
-#define PIPE_FRMCOUNT_GM45(pipe) _PIPE2(pipe, _PIPEA_FRMCOUNT_GM45)
-#define PIPE_FLIPCOUNT_GM45(pipe) _PIPE2(pipe, _PIPEA_FLIPCOUNT_GM45)
+#define _PIPEA_FRMCOUNT_G4X	0x70040
+#define _PIPEA_FLIPCOUNT_G4X	0x70044
+#define PIPE_FRMCOUNT_G4X(pipe) _PIPE2(pipe, _PIPEA_FRMCOUNT_G4X)
+#define PIPE_FLIPCOUNT_G4X(pipe) _PIPE2(pipe, _PIPEA_FLIPCOUNT_G4X)
 
 /* Cursor A & B regs */
 #define _CURACNTR		0x70080
@@ -4958,8 +4958,8 @@ enum skl_disp_power_wells {
 #define _PIPEBSTAT		(dev_priv->info.display_mmio_offset + 0x71024)
 #define _PIPEBFRAMEHIGH		0x71040
 #define _PIPEBFRAMEPIXEL	0x71044
-#define _PIPEB_FRMCOUNT_GM45	(dev_priv->info.display_mmio_offset + 0x71040)
-#define _PIPEB_FLIPCOUNT_GM45	(dev_priv->info.display_mmio_offset + 0x71044)
+#define _PIPEB_FRMCOUNT_G4X	(dev_priv->info.display_mmio_offset + 0x71040)
+#define _PIPEB_FLIPCOUNT_G4X	(dev_priv->info.display_mmio_offset + 0x71044)
 
 
 /* Display B control */
@@ -7424,6 +7424,7 @@ enum skl_disp_power_wells {
 #define  DC_STATE_EN_UPTO_DC5_DC6_MASK   0x3
 
 #define  DC_STATE_DEBUG                  0x45520
+#define  DC_STATE_DEBUG_MASK_CORES	(1<<0)
 #define  DC_STATE_DEBUG_MASK_MEMORY_UP	(1<<1)
 
 /* Please see hsw_read_dcomp() and hsw_write_dcomp() before using this register,
@@ -7505,6 +7506,59 @@ enum skl_disp_power_wells {
 #define PIPE_CSC_POSTOFF_HI(pipe) _PIPE(pipe, _PIPE_A_CSC_POSTOFF_HI, _PIPE_B_CSC_POSTOFF_HI)
 #define PIPE_CSC_POSTOFF_ME(pipe) _PIPE(pipe, _PIPE_A_CSC_POSTOFF_ME, _PIPE_B_CSC_POSTOFF_ME)
 #define PIPE_CSC_POSTOFF_LO(pipe) _PIPE(pipe, _PIPE_A_CSC_POSTOFF_LO, _PIPE_B_CSC_POSTOFF_LO)
+
+/* pipe degamma/gamma LUTs on IVB+ */
+#define _PAL_PREC_INDEX_A	0x4A400
+#define _PAL_PREC_INDEX_B	0x4AC00
+#define _PAL_PREC_INDEX_C	0x4B400
+#define   PAL_PREC_10_12_BIT		(0 << 31)
+#define   PAL_PREC_SPLIT_MODE		(1 << 31)
+#define   PAL_PREC_AUTO_INCREMENT	(1 << 15)
+#define _PAL_PREC_DATA_A	0x4A404
+#define _PAL_PREC_DATA_B	0x4AC04
+#define _PAL_PREC_DATA_C	0x4B404
+#define _PAL_PREC_GC_MAX_A	0x4A410
+#define _PAL_PREC_GC_MAX_B	0x4AC10
+#define _PAL_PREC_GC_MAX_C	0x4B410
+#define _PAL_PREC_EXT_GC_MAX_A	0x4A420
+#define _PAL_PREC_EXT_GC_MAX_B	0x4AC20
+#define _PAL_PREC_EXT_GC_MAX_C	0x4B420
+
+#define PREC_PAL_INDEX(pipe)		_PIPE(pipe, _PAL_PREC_INDEX_A, _PAL_PREC_INDEX_B)
+#define PREC_PAL_DATA(pipe)		_PIPE(pipe, _PAL_PREC_DATA_A, _PAL_PREC_DATA_B)
+#define PREC_PAL_GC_MAX(pipe, i)	(_PIPE(pipe, _PAL_PREC_GC_MAX_A, _PAL_PREC_GC_MAX_B) + (i) * 4)
+#define PREC_PAL_EXT_GC_MAX(pipe, i)	(_PIPE(pipe, _PAL_PREC_EXT_GC_MAX_A, _PAL_PREC_EXT_GC_MAX_B) + (i) * 4)
+
+/* pipe CSC & degamma/gamma LUTs on CHV */
+#define _CGM_PIPE_A_CSC_COEFF01	(VLV_DISPLAY_BASE + 0x67900)
+#define _CGM_PIPE_A_CSC_COEFF23	(VLV_DISPLAY_BASE + 0x67904)
+#define _CGM_PIPE_A_CSC_COEFF45	(VLV_DISPLAY_BASE + 0x67908)
+#define _CGM_PIPE_A_CSC_COEFF67	(VLV_DISPLAY_BASE + 0x6790C)
+#define _CGM_PIPE_A_CSC_COEFF8	(VLV_DISPLAY_BASE + 0x67910)
+#define _CGM_PIPE_A_DEGAMMA	(VLV_DISPLAY_BASE + 0x66000)
+#define _CGM_PIPE_A_GAMMA	(VLV_DISPLAY_BASE + 0x67000)
+#define _CGM_PIPE_A_MODE	(VLV_DISPLAY_BASE + 0x67A00)
+#define   CGM_PIPE_MODE_GAMMA	(1 << 2)
+#define   CGM_PIPE_MODE_CSC	(1 << 1)
+#define   CGM_PIPE_MODE_DEGAMMA	(1 << 0)
+
+#define _CGM_PIPE_B_CSC_COEFF01	(VLV_DISPLAY_BASE + 0x69900)
+#define _CGM_PIPE_B_CSC_COEFF23	(VLV_DISPLAY_BASE + 0x69904)
+#define _CGM_PIPE_B_CSC_COEFF45	(VLV_DISPLAY_BASE + 0x69908)
+#define _CGM_PIPE_B_CSC_COEFF67	(VLV_DISPLAY_BASE + 0x6990C)
+#define _CGM_PIPE_B_CSC_COEFF8	(VLV_DISPLAY_BASE + 0x69910)
+#define _CGM_PIPE_B_DEGAMMA	(VLV_DISPLAY_BASE + 0x68000)
+#define _CGM_PIPE_B_GAMMA	(VLV_DISPLAY_BASE + 0x69000)
+#define _CGM_PIPE_B_MODE	(VLV_DISPLAY_BASE + 0x69A00)
+
+#define CGM_PIPE_CSC_COEFF01(pipe)	_PIPE(pipe, _CGM_PIPE_A_CSC_COEFF01, _CGM_PIPE_B_CSC_COEFF01)
+#define CGM_PIPE_CSC_COEFF23(pipe)	_PIPE(pipe, _CGM_PIPE_A_CSC_COEFF23, _CGM_PIPE_B_CSC_COEFF23)
+#define CGM_PIPE_CSC_COEFF45(pipe)	_PIPE(pipe, _CGM_PIPE_A_CSC_COEFF45, _CGM_PIPE_B_CSC_COEFF45)
+#define CGM_PIPE_CSC_COEFF67(pipe)	_PIPE(pipe, _CGM_PIPE_A_CSC_COEFF67, _CGM_PIPE_B_CSC_COEFF67)
+#define CGM_PIPE_CSC_COEFF8(pipe)	_PIPE(pipe, _CGM_PIPE_A_CSC_COEFF8, _CGM_PIPE_B_CSC_COEFF8)
+#define CGM_PIPE_DEGAMMA(pipe, i, w)	(_PIPE(pipe, _CGM_PIPE_A_DEGAMMA, _CGM_PIPE_B_DEGAMMA) + (i) * 8 + (w) * 4)
+#define CGM_PIPE_GAMMA(pipe, i, w)	(_PIPE(pipe, _CGM_PIPE_A_GAMMA, _CGM_PIPE_B_GAMMA) + (i) * 8 + (w) * 4)
+#define CGM_PIPE_MODE(pipe)		_PIPE(pipe, _CGM_PIPE_A_MODE, _CGM_PIPE_B_MODE)
 
 /* MIPI DSI registers */
 

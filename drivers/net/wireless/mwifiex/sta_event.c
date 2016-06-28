@@ -128,7 +128,7 @@ mwifiex_reset_connect_state(struct mwifiex_private *priv, u16 reason_code)
 	if (priv->bss_mode == NL80211_IFTYPE_STATION ||
 	    priv->bss_mode == NL80211_IFTYPE_P2P_CLIENT) {
 		cfg80211_disconnected(priv->netdev, reason_code, NULL, 0,
-				      GFP_KERNEL);
+				      false, GFP_KERNEL);
 	}
 	memset(priv->cfg_bssid, 0, ETH_ALEN);
 
@@ -377,6 +377,13 @@ int mwifiex_process_sta_event(struct mwifiex_private *priv)
 		mwifiex_dbg(adapter, EVENT, "event: BGS_REPORT\n");
 		ret = mwifiex_send_cmd(priv, HostCmd_CMD_802_11_BG_SCAN_QUERY,
 				       HostCmd_ACT_GEN_GET, 0, NULL, false);
+		break;
+
+	case EVENT_BG_SCAN_STOPPED:
+		dev_dbg(adapter->dev, "event: BGS_STOPPED\n");
+		cfg80211_sched_scan_stopped(priv->wdev.wiphy);
+		if (priv->sched_scanning)
+			priv->sched_scanning = false;
 		break;
 
 	case EVENT_PORT_RELEASE:

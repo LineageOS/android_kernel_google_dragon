@@ -54,11 +54,11 @@ struct cpuidle_state {
 	/*
 	 * CPUs execute ->enter_freeze with the local tick or entire timekeeping
 	 * suspended, so it must not re-enable interrupts at any point (even
-	 * temporarily) or attempt to change states of clock event devices.
+	 * temporarily). Returns 0 on success and non-zero if an error occurred.
 	 */
-	void (*enter_freeze) (struct cpuidle_device *dev,
-			      struct cpuidle_driver *drv,
-			      int index);
+	int (*enter_freeze) (struct cpuidle_device *dev,
+			     struct cpuidle_driver *drv,
+			     int index);
 };
 
 /* Idle State Flags */
@@ -149,6 +149,8 @@ extern void cpuidle_pause_and_lock(void);
 extern void cpuidle_resume_and_unlock(void);
 extern void cpuidle_pause(void);
 extern void cpuidle_resume(void);
+extern void cpuidle_prepare_freeze(void);
+extern int cpuidle_complete_freeze(void);
 extern int cpuidle_enable_device(struct cpuidle_device *dev);
 extern void cpuidle_disable_device(struct cpuidle_device *dev);
 extern int cpuidle_play_dead(void);
@@ -197,9 +199,14 @@ static inline int cpuidle_find_deepest_state(struct cpuidle_driver *drv,
 static inline int cpuidle_enter_freeze(struct cpuidle_driver *drv,
 				       struct cpuidle_device *dev)
 {return -ENODEV; }
+static inline void cpuidle_prepare_freeze(void) { }
+static inline int cpuidle_complete_freeze(void) { return -ENODEV; }
 static inline struct cpuidle_driver *cpuidle_get_cpu_driver(
 	struct cpuidle_device *dev) {return NULL; }
 #endif
+
+/* kernel/sched/idle.c */
+extern void sched_idle_set_state(struct cpuidle_state *idle_state, int index);
 
 #ifdef CONFIG_ARCH_NEEDS_CPU_IDLE_COUPLED
 void cpuidle_coupled_parallel_barrier(struct cpuidle_device *dev, atomic_t *a);

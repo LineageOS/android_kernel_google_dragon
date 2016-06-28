@@ -551,6 +551,60 @@ IEEE80211_IF_FILE(dot11MeshHWMPconfirmationInterval,
 IEEE80211_IF_FILE(power_mode, u.mesh.mshcfg.power_mode, DEC);
 IEEE80211_IF_FILE(dot11MeshAwakeWindowDuration,
 		  u.mesh.mshcfg.dot11MeshAwakeWindowDuration, DEC);
+
+static ssize_t ieee80211_if_fmt_bitrate_avg_weight(
+	const struct ieee80211_sub_if_data *sdata, char *buf, int buflen)
+{
+	return snprintf(buf, buflen, "%d\n", sdata->u.mesh.bitrate_avg_weight);
+}
+
+static ssize_t ieee80211_if_parse_bitrate_avg_weight(
+	struct ieee80211_sub_if_data *sdata, const char *buf, int buflen)
+{
+	u8 val;
+	int ret;
+
+	ret = kstrtou8(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	if (val > 100)
+		return -ERANGE;
+
+	sdata->u.mesh.bitrate_avg_weight = val;
+
+	return buflen;
+}
+
+IEEE80211_IF_FILE_RW(bitrate_avg_weight);
+
+static ssize_t ieee80211_if_fmt_path_switch_threshold(
+	const struct ieee80211_sub_if_data *sdata, char *buf, int buflen)
+{
+	return snprintf(buf, buflen, "%d\n",
+		sdata->u.mesh.path_switch_threshold);
+}
+
+static ssize_t ieee80211_if_parse_path_switch_threshold(
+	struct ieee80211_sub_if_data *sdata, const char *buf, int buflen)
+{
+	u8 val;
+	int ret;
+
+	ret = kstrtou8(buf, 0, &val);
+	if (ret)
+		return ret;
+
+	if (val > 100)
+		return -ERANGE;
+
+	sdata->u.mesh.path_switch_threshold = val;
+
+	return buflen;
+}
+
+IEEE80211_IF_FILE_RW(path_switch_threshold);
+
 #endif
 
 #define DEBUGFS_ADD_MODE(name, mode) \
@@ -608,6 +662,8 @@ static void add_mesh_files(struct ieee80211_sub_if_data *sdata)
 {
 	DEBUGFS_ADD_MODE(tsf, 0600);
 	DEBUGFS_ADD_MODE(estab_plinks, 0400);
+	DEBUGFS_ADD_MODE(bitrate_avg_weight, 0600);
+	DEBUGFS_ADD_MODE(path_switch_threshold, 0600);
 }
 
 static void add_mesh_stats(struct ieee80211_sub_if_data *sdata)
@@ -684,6 +740,9 @@ static void add_files(struct ieee80211_sub_if_data *sdata)
 		add_mesh_files(sdata);
 		add_mesh_stats(sdata);
 		add_mesh_config(sdata);
+		if (sdata->vif.debugfs_dir)
+			sdata->debugfs.subdir_destinations = debugfs_create_dir(
+					"destinations", sdata->vif.debugfs_dir);
 #endif
 		break;
 	case NL80211_IFTYPE_STATION:
@@ -724,6 +783,9 @@ void ieee80211_debugfs_remove_netdev(struct ieee80211_sub_if_data *sdata)
 	debugfs_remove_recursive(sdata->vif.debugfs_dir);
 	sdata->vif.debugfs_dir = NULL;
 	sdata->debugfs.subdir_stations = NULL;
+#ifdef CONFIG_MAC80211_MESH
+	sdata->debugfs.subdir_destinations = NULL;
+#endif
 }
 
 void ieee80211_debugfs_rename_netdev(struct ieee80211_sub_if_data *sdata)

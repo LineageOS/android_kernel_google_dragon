@@ -1088,7 +1088,8 @@ static struct drm_plane *tegra_dc_primary_plane_create(struct drm_device *drm,
 				       &tegra_primary_plane_funcs,
 				       dc->soc->primary_plane_formats,
 				       dc->soc->num_primary_plane_formats,
-				       DRM_PLANE_TYPE_PRIMARY);
+				       DRM_PLANE_TYPE_PRIMARY,
+				       NULL);
 	if (err < 0) {
 		kfree(plane);
 		return ERR_PTR(err);
@@ -1259,7 +1260,8 @@ static struct drm_plane *tegra_dc_cursor_plane_create(struct drm_device *drm,
 
 	err = drm_universal_plane_init(drm, &plane->base, 1 << dc->pipe,
 				       &tegra_cursor_plane_funcs, formats,
-				       num_formats, DRM_PLANE_TYPE_CURSOR);
+				       num_formats, DRM_PLANE_TYPE_CURSOR,
+				       NULL);
 	if (err < 0) {
 		kfree(plane);
 		return ERR_PTR(err);
@@ -1309,7 +1311,8 @@ static struct drm_plane *tegra_dc_overlay_plane_create(struct drm_device *drm,
 				       &tegra_overlay_plane_funcs,
 				       dc->soc->overlay_plane_formats,
 				       dc->soc->num_overlay_plane_formats,
-				       DRM_PLANE_TYPE_OVERLAY);
+				       DRM_PLANE_TYPE_OVERLAY,
+				       NULL);
 	if (err < 0) {
 		kfree(plane);
 		return ERR_PTR(err);
@@ -2688,8 +2691,8 @@ static int tegra_dc_show_regs(struct seq_file *s, void *data)
 	u32 state_access_save;
 	int i;
 
-	if (!tegra_powergate_is_powered(dc->powergate)) {
-		DRM_INFO("Can't dump registers as dc is powergated\n");
+	if (dc->dpms == DRM_MODE_DPMS_OFF) {
+		DRM_INFO("Can't dump registers if dc is disabled\n");
 		return -EPERM;
 	}
 
@@ -3073,7 +3076,7 @@ static int tegra_dc_init(struct host1x_client *client)
 	}
 
 	err = drm_crtc_init_with_planes(drm, &dc->base, primary, cursor,
-					&tegra_crtc_funcs);
+					&tegra_crtc_funcs, NULL);
 	if (err < 0)
 		goto cleanup;
 

@@ -401,6 +401,8 @@ struct sdhci_host {
 #define SDHCI_QUIRK2_BROKEN_64_BIT_DMA			(1<<9)
 /* Capability register bit-63 indicates HS400 support */
 #define SDHCI_QUIRK2_CAPS_BIT63_FOR_HS400		(1<<11)
+/* For frequency derived from non-ddr plls, disable ddr pll */
+#define SDHCI_QUIRK2_MMC_DISABLE_DDR_PLL_CLK_SRC	(1<<12)
 
 /* CHROMIUM */
 /* Baytrail eMMC slot needs to restrict Cx states during DMA transfer */
@@ -409,6 +411,7 @@ struct sdhci_host {
 #define SDHCI_QUIRK2_TUNING_CLOCK_OFF                  (1<<30)
 /* Reset on retune to avoid inhibit bits not released on Tegra  */
 #define SDHCI_QUIRK2_RESET_ON_TUNE_TIMEOUT		(1<<29)
+#define SDHCI_QUIRK2_RTPM_NO_RETUNE			(1<<28)
 
 	int irq;		/* Device IRQ */
 	void __iomem *ioaddr;	/* Mapped address */

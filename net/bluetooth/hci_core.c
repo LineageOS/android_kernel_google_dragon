@@ -2021,6 +2021,7 @@ static void hci_power_on(struct work_struct *work)
 	if (test_bit(HCI_UP, &hdev->flags) &&
 	    hci_dev_test_flag(hdev, HCI_MGMT) &&
 	    hci_dev_test_and_clear_flag(hdev, HCI_AUTO_OFF)) {
+		cancel_delayed_work(&hdev->power_off);
 		hci_req_sync_lock(hdev);
 		err = __hci_req_hci_power_on(hdev);
 		hci_req_sync_unlock(hdev);
@@ -4120,8 +4121,10 @@ void hci_req_cmd_complete(struct hci_dev *hdev, u16 opcode, u8 status,
 			break;
 		}
 
-		*req_complete = bt_cb(skb)->hci.req_complete;
-		*req_complete_skb = bt_cb(skb)->hci.req_complete_skb;
+		if (bt_cb(skb)->hci.req_flags & HCI_REQ_SKB)
+			*req_complete_skb = bt_cb(skb)->hci.req_complete_skb;
+		else
+			*req_complete = bt_cb(skb)->hci.req_complete;
 		kfree_skb(skb);
 	}
 	spin_unlock_irqrestore(&hdev->cmd_q.lock, flags);

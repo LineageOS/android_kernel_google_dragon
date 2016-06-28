@@ -94,6 +94,13 @@ ftrace_func_t ftrace_ops_get_func(struct ftrace_ops *ops);
  * ADDING  - The ops is in the process of being added.
  * REMOVING - The ops is in the process of being removed.
  * MODIFYING - The ops is in the process of changing its filter functions.
+ * ALLOC_TRAMP - A dynamic trampoline was allocated by the core code.
+ *            The arch specific code sets this flag when it allocated a
+ *            trampoline. This lets the arch know that it can update the
+ *            trampoline in case the callback function changes.
+ *            The ftrace_ops trampoline can be set by the ftrace users, and
+ *            in such cases the arch must not modify it. Only the arch ftrace
+ *            core code should set this flag.
  */
 enum {
 	FTRACE_OPS_FL_ENABLED			= 1 << 0,
@@ -108,6 +115,7 @@ enum {
 	FTRACE_OPS_FL_ADDING			= 1 << 9,
 	FTRACE_OPS_FL_REMOVING			= 1 << 10,
 	FTRACE_OPS_FL_MODIFYING			= 1 << 11,
+	FTRACE_OPS_FL_ALLOC_TRAMP		= 1 << 12,
 };
 
 #ifdef CONFIG_DYNAMIC_FTRACE
@@ -729,16 +737,6 @@ ftrace_push_return_trace(unsigned long ret, unsigned long func, int *depth,
  */
 #define __notrace_funcgraph		notrace
 
-/*
- * We want to which function is an entrypoint of a hardirq.
- * That will help us to put a signal on output.
- */
-#define __irq_entry		 __attribute__((__section__(".irqentry.text")))
-
-/* Limits of hardirq entrypoints */
-extern char __irqentry_text_start[];
-extern char __irqentry_text_end[];
-
 #define FTRACE_NOTRACE_DEPTH 65536
 #define FTRACE_RETFUNC_DEPTH 50
 #define FTRACE_RETSTACK_ALLOC_SIZE 32
@@ -775,7 +773,6 @@ static inline void unpause_graph_tracing(void)
 #else /* !CONFIG_FUNCTION_GRAPH_TRACER */
 
 #define __notrace_funcgraph
-#define __irq_entry
 #define INIT_FTRACE_GRAPH
 
 static inline void ftrace_graph_init_task(struct task_struct *t) { }

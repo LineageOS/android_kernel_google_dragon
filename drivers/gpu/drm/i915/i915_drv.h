@@ -662,6 +662,9 @@ struct drm_i915_display_funcs {
 	void (*enable_backlight)(struct intel_connector *connector);
 	uint32_t (*backlight_hz_to_pwm)(struct intel_connector *connector,
 					uint32_t hz);
+
+	void (*load_csc_matrix)(struct drm_crtc *crtc);
+	void (*load_luts)(struct drm_crtc *crtc);
 };
 
 enum forcewake_domain_id {
@@ -747,6 +750,7 @@ struct intel_csr {
 	uint32_t mmio_count;
 	uint32_t mmioaddr[8];
 	uint32_t mmiodata[8];
+	uint32_t dc_state;
 };
 
 #define DEV_INFO_FOR_EACH_FLAG(func, sep) \
@@ -804,6 +808,11 @@ struct intel_device_info {
 	u8 has_slice_pg:1;
 	u8 has_subslice_pg:1;
 	u8 has_eu_pg:1;
+
+	struct color_luts {
+		u16 degamma_lut_size;
+		u16 gamma_lut_size;
+	} color;
 };
 
 #undef DEFINE_FLAG
@@ -1600,6 +1609,7 @@ struct skl_wm_level {
  * For more, read the Documentation/power/runtime_pm.txt.
  */
 struct i915_runtime_pm {
+	atomic_t wakeref_count;
 	bool suspended;
 	bool irqs_enabled;
 };
@@ -2157,8 +2167,17 @@ struct drm_i915_gem_request {
 	struct drm_i915_private *i915;
 	struct intel_engine_cs *ring;
 
-	/** GEM sequence number associated with this request. */
-	uint32_t seqno;
+	 /** GEM sequence number associated with the previous request,
+	  * when the HWS breadcrumb is equal to this the GPU is processing
+	  * this request.
+	  */
+	u32 previous_seqno;
+
+	 /** GEM sequence number associated with this request,
+	  * when the HWS breadcrumb is equal or greater than this the GPU
+	  * has finished processing this request.
+	  */
+	u32 seqno;
 
 	/** Position in the ringbuffer of the start of the request */
 	u32 head;
@@ -2602,6 +2621,7 @@ struct i915_params {
 	unsigned int preliminary_hw_support;
 	int disable_power_well;
 	int enable_ips;
+	int enable_watermark;
 	int invert_brightness;
 	int enable_cmd_parser;
 	/* leave bools at the end to not create holes */
@@ -2616,6 +2636,7 @@ struct i915_params {
 	int mmio_debug;
 	bool verbose_state_checks;
 	int edp_vswing;
+	bool enable_dp_mst;
 };
 extern struct i915_params i915 __read_mostly;
 
@@ -2851,15 +2872,17 @@ i915_seqno_passed(uint32_t seq1, uint32_t seq2)
 	return (int32_t)(seq1 - seq2) >= 0;
 }
 
+static inline bool i915_gem_request_started(struct drm_i915_gem_request *req,
+					   bool lazy_coherency)
+{
+	u32 seqno = req->ring->get_seqno(req->ring, lazy_coherency);
+	return i915_seqno_passed(seqno, req->previous_seqno);
+}
+
 static inline bool i915_gem_request_completed(struct drm_i915_gem_request *req,
 					      bool lazy_coherency)
 {
-	u32 seqno;
-
-	BUG_ON(req == NULL);
-
-	seqno = req->ring->get_seqno(req->ring, lazy_coherency);
-
+	u32 seqno = req->ring->get_seqno(req->ring, lazy_coherency);
 	return i915_seqno_passed(seqno, req->seqno);
 }
 

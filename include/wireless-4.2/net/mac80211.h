@@ -973,6 +973,10 @@ ieee80211_tx_info_clear_status(struct ieee80211_tx_info *info)
  * @RX_FLAG_IV_STRIPPED: The IV/ICV are stripped from this frame.
  *	If this flag is set, the stack cannot do any replay detection
  *	hence the driver or hardware will have to do that.
+ * @RX_FLAG_PN_VALIDATED: Currently only valid for CCMP/GCMP frames, this
+ *	flag indicates that the PN was verified for replay protection.
+ *	Note that this flag is also currently only supported when a frame
+ *	is also decrypted (ie. @RX_FLAG_DECRYPTED must be set)
  * @RX_FLAG_FAILED_FCS_CRC: Set this flag if the FCS check failed on
  *	the frame.
  * @RX_FLAG_FAILED_PLCP_CRC: Set this flag if the PCLP check failed on
@@ -997,9 +1001,6 @@ ieee80211_tx_info_clear_status(struct ieee80211_tx_info *info)
  * @RX_FLAG_AMPDU_DETAILS: A-MPDU details are known, in particular the reference
  *	number (@ampdu_reference) must be populated and be a distinct number for
  *	each A-MPDU
- * @RX_FLAG_AMPDU_REPORT_ZEROLEN: driver reports 0-length subframes
- * @RX_FLAG_AMPDU_IS_ZEROLEN: This is a zero-length subframe, for
- *	monitoring purposes only
  * @RX_FLAG_AMPDU_LAST_KNOWN: last subframe is known, should be set on all
  *	subframes of a single A-MPDU
  * @RX_FLAG_AMPDU_IS_LAST: this subframe is the last subframe of the A-MPDU
@@ -1039,8 +1040,8 @@ enum mac80211_rx_flags {
 	RX_FLAG_NO_SIGNAL_VAL		= BIT(12),
 	RX_FLAG_HT_GF			= BIT(13),
 	RX_FLAG_AMPDU_DETAILS		= BIT(14),
-	RX_FLAG_AMPDU_REPORT_ZEROLEN	= BIT(15),
-	RX_FLAG_AMPDU_IS_ZEROLEN	= BIT(16),
+	RX_FLAG_PN_VALIDATED		= BIT(15),
+	/* bit 16 free */
 	RX_FLAG_AMPDU_LAST_KNOWN	= BIT(17),
 	RX_FLAG_AMPDU_IS_LAST		= BIT(18),
 	RX_FLAG_AMPDU_DELIM_CRC_ERROR	= BIT(19),
@@ -5434,4 +5435,19 @@ void ieee80211_unreserve_tid(struct ieee80211_sta *sta, u8 tid);
  */
 struct sk_buff *ieee80211_tx_dequeue(struct ieee80211_hw *hw,
 				     struct ieee80211_txq *txq);
+
+/**
+ * ieee80211_txq_get_depth - get pending frame/byte count of given txq
+ *
+ * The values are not guaranteed to be coherent with regard to each other, i.e.
+ * txq state can change half-way of this function and the caller may end up
+ * with "new" frame_cnt and "old" byte_cnt or vice-versa.
+ *
+ * @txq: pointer obtained from station or virtual interface
+ * @frame_cnt: pointer to store frame count
+ * @byte_cnt: pointer to store byte count
+ */
+void ieee80211_txq_get_depth(struct ieee80211_txq *txq,
+			     unsigned long *frame_cnt,
+			     unsigned long *byte_cnt);
 #endif /* MAC80211_H */

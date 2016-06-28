@@ -37,6 +37,18 @@
 #include <linux/wireless.h>
 #include <net/iw_handler.h>
 #include <linux/inetdevice.h>
+#include <linux/devcoredump.h>
+#include <linux/err.h>
+#include <linux/gpio.h>
+#include <linux/gfp.h>
+#include <linux/interrupt.h>
+#include <linux/io.h>
+#include <linux/of_gpio.h>
+#include <linux/of_platform.h>
+#include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
+#include <linux/slab.h>
+#include <linux/of_irq.h>
 
 #include "decl.h"
 #include "ioctl.h"
@@ -92,8 +104,8 @@ enum {
 #define SCAN_BEACON_ENTRY_PAD			6
 
 #define MWIFIEX_PASSIVE_SCAN_CHAN_TIME	110
-#define MWIFIEX_ACTIVE_SCAN_CHAN_TIME	30
-#define MWIFIEX_SPECIFIC_SCAN_CHAN_TIME	30
+#define MWIFIEX_ACTIVE_SCAN_CHAN_TIME	40
+#define MWIFIEX_SPECIFIC_SCAN_CHAN_TIME	40
 #define MWIFIEX_DEF_SCAN_CHAN_GAP_TIME  50
 
 #define SCAN_RSSI(RSSI)					(0x100 - ((u8)(RSSI)))
@@ -184,6 +196,11 @@ do {								\
 		if ((adapter)->dev)				\
 			dev_info((adapter)->dev, fmt, ## args);	\
 } while (0)
+
+/** Min BGSCAN interval 15 second */
+#define MWIFIEX_BGSCAN_INTERVAL 15000
+/** default repeat count */
+#define MWIFIEX_BGSCAN_REPEAT_COUNT 6
 
 struct mwifiex_dbg {
 	u32 num_cmd_host_to_card_failure;
@@ -491,6 +508,7 @@ enum rdwr_status {
 enum mwifiex_iface_work_flags {
 	MWIFIEX_IFACE_WORK_FW_DUMP,
 	MWIFIEX_IFACE_WORK_CARD_RESET,
+	MWIFIEX_IFACE_WORK_READ_REGS,
 };
 
 struct mwifiex_adapter;
@@ -625,6 +643,7 @@ struct mwifiex_private {
 	u32 mgmt_frame_mask;
 	struct mwifiex_roc_cfg roc_cfg;
 	bool scan_aborting;
+	u8 sched_scanning;
 	u8 csa_chan;
 	unsigned long csa_expire_time;
 	u8 del_list_idx;
@@ -632,6 +651,7 @@ struct mwifiex_private {
 	struct station_parameters *sta_params;
 	struct sk_buff_head tdls_txq;
 	struct mwifiex_ds_mem_rw mem_rw;
+	struct mwifiex_user_scan_chan hidden_chan[MWIFIEX_USER_SCAN_CHAN_MAX];
 };
 
 
@@ -795,6 +815,8 @@ struct mwifiex_adapter {
 	u8 more_task_flag;
 	u16 tx_buf_size;
 	u16 curr_tx_buf_size;
+	/* sdio single port rx aggregation capability */
+	bool host_disable_sdio_rx_aggr;
 	bool sdio_rx_aggr_enable;
 	u16 sdio_rx_block_size;
 	u32 ioport;
@@ -912,6 +934,8 @@ struct mwifiex_adapter {
 	bool scan_chan_gap_enabled;
 	struct sk_buff_head rx_data_q;
 	bool mfg_mode;
+	struct cfg80211_wowlan_nd_info *nd_info;
+	u8 active_scan_triggered;
 };
 
 int mwifiex_init_lock_list(struct mwifiex_adapter *adapter);
@@ -1102,6 +1126,10 @@ int mwifiex_cmd_802_11_scan_ext(struct mwifiex_private *priv,
 int mwifiex_ret_802_11_scan_ext(struct mwifiex_private *priv);
 int mwifiex_handle_event_ext_scan_report(struct mwifiex_private *priv,
 					 void *buf);
+int mwifiex_cmd_802_11_bg_scan_config(struct mwifiex_private *priv,
+				      struct host_cmd_ds_command *cmd,
+				      void *data_buf);
+int mwifiex_stop_bg_scan(struct mwifiex_private *priv);
 
 /*
  * This function checks if the queuing is RA based or not.
@@ -1372,6 +1400,12 @@ void *mwifiex_alloc_dma_align_buf(int rx_len, gfp_t flags);
 void mwifiex_queue_main_work(struct mwifiex_adapter *adapter);
 int mwifiex_process_host_command(struct mwifiex_private *priv,
 				 struct iwreq *wrq);
+int mwifiex_get_wakeup_reason(struct mwifiex_private *priv, u16 action,
+			      int cmd_type,
+			      struct mwifiex_ds_wakeup_reason *wakeup_reason);
+int mwifiex_ret_wakeup_reason(struct mwifiex_private *priv,
+			      struct host_cmd_ds_command *resp,
+			      struct host_cmd_ds_wakeup_reason *wakeup_reason);
 
 int mwifiex_sysfs_register(struct mwifiex_private *priv);
 void mwifiex_sysfs_unregister(struct mwifiex_private *priv);

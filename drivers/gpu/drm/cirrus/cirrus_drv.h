@@ -49,6 +49,17 @@
 		WREG8(SEQ_DATA, v);				\
 	} while (0)						\
 
+#define PAL_ADDR 8
+#define PAL_DATA 9
+
+#define WREG_PAL(addr, r, g, b)					\
+	do {							\
+		WREG8(PAL_ADDR, addr);				\
+		WREG8(PAL_DATA, r);				\
+		WREG8(PAL_DATA, g);				\
+		WREG8(PAL_DATA, b);				\
+	} while (0)						\
+
 #define CRT_INDEX 0x14
 #define CRT_DATA 0x15
 
@@ -136,6 +147,8 @@ struct cirrus_device {
 	void __iomem			*rmmio;
 
 	struct cirrus_mc			mc;
+	resource_size_t			cursor_ram_size;
+	void __iomem			*cursor_iomem;
 	struct cirrus_mode_info		mode_info;
 
 	int				num_crtc;
@@ -208,7 +221,7 @@ int cirrus_dumb_create(struct drm_file *file,
 
 int cirrus_framebuffer_init(struct drm_device *dev,
 			   struct cirrus_framebuffer *gfb,
-			    struct drm_mode_fb_cmd2 *mode_cmd,
+			    const struct drm_mode_fb_cmd2 *mode_cmd,
 			    struct drm_gem_object *obj);
 
 bool cirrus_check_framebuffer(int width, int height, int bpp, int pitch);

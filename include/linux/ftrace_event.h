@@ -45,7 +45,7 @@ const char *ftrace_print_hex_seq(struct trace_seq *p,
 				 const unsigned char *buf, int len);
 
 const char *ftrace_print_array_seq(struct trace_seq *p,
-				   const void *buf, int buf_len,
+				   const void *buf, int count,
 				   size_t el_size);
 
 struct trace_iterator;
@@ -141,6 +141,17 @@ enum print_line_t {
 	TRACE_TYPE_UNHANDLED	= 2,	/* Relay to other output functions */
 	TRACE_TYPE_NO_CONSUME	= 3	/* Handled but ask to not consume */
 };
+
+/*
+ * Several functions return TRACE_TYPE_PARTIAL_LINE if the trace_seq
+ * overflowed, and TRACE_TYPE_HANDLED otherwise. This helper function
+ * simplifies those functions and keeps them in sync.
+ */
+static inline enum print_line_t trace_handle_return(struct trace_seq *s)
+{
+	return trace_seq_has_overflowed(s) ?
+		TRACE_TYPE_PARTIAL_LINE : TRACE_TYPE_HANDLED;
+}
 
 void tracing_generic_entry_update(struct trace_entry *entry,
 				  unsigned long flags,

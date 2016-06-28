@@ -1009,7 +1009,8 @@ static uint16_t vlv_compute_wm_level(struct intel_plane *plane,
 	if (WARN_ON(htotal == 0))
 		htotal = 1;
 
-	if (plane->base.type == DRM_PLANE_TYPE_CURSOR) {
+	if (plane->base.type == DRM_PLANE_TYPE_CURSOR &&
+	    pipe_has_cursor_plane(dev_priv, plane->pipe)) {
 		/*
 		 * FIXME the formula gives values that are
 		 * too big for the cursor FIFO, and hence we
@@ -1038,7 +1039,8 @@ static void vlv_compute_fifo(struct intel_crtc *crtc)
 		struct intel_plane_state *state =
 			to_intel_plane_state(plane->base.state);
 
-		if (plane->base.type == DRM_PLANE_TYPE_CURSOR)
+		if (plane->base.type == DRM_PLANE_TYPE_CURSOR &&
+		    pipe_has_cursor_plane(dev->dev_private, plane->pipe))
 			continue;
 
 		if (state->visible) {
@@ -1052,7 +1054,8 @@ static void vlv_compute_fifo(struct intel_crtc *crtc)
 			to_intel_plane_state(plane->base.state);
 		unsigned int rate;
 
-		if (plane->base.type == DRM_PLANE_TYPE_CURSOR) {
+		if (plane->base.type == DRM_PLANE_TYPE_CURSOR &&
+		    pipe_has_cursor_plane(dev->dev_private, plane->pipe)) {
 			plane->wm.fifo_size = 63;
 			continue;
 		}
@@ -1076,7 +1079,8 @@ static void vlv_compute_fifo(struct intel_crtc *crtc)
 		if (fifo_left == 0)
 			break;
 
-		if (plane->base.type == DRM_PLANE_TYPE_CURSOR)
+		if (plane->base.type == DRM_PLANE_TYPE_CURSOR &&
+		    pipe_has_cursor_plane(dev->dev_private, plane->pipe))
 			continue;
 
 		/* give it all to the first plane if none are active */
@@ -1096,6 +1100,7 @@ static void vlv_invert_wms(struct intel_crtc *crtc)
 {
 	struct vlv_wm_state *wm_state = &crtc->wm_state;
 	int level;
+	enum drm_plane_type plane_type;
 
 	for (level = 0; level < wm_state->num_levels; level++) {
 		struct drm_device *dev = crtc->base.dev;
@@ -1106,7 +1111,13 @@ static void vlv_invert_wms(struct intel_crtc *crtc)
 		wm_state->sr[level].cursor = 63 - wm_state->sr[level].cursor;
 
 		for_each_intel_plane_on_crtc(dev, crtc, plane) {
-			switch (plane->base.type) {
+			plane_type = plane->base.type;
+
+			if (plane_type == DRM_PLANE_TYPE_CURSOR &&
+			    !pipe_has_cursor_plane(to_i915(dev), plane->pipe))
+				plane_type = DRM_PLANE_TYPE_OVERLAY;
+
+			switch (plane_type) {
 				int sprite;
 			case DRM_PLANE_TYPE_CURSOR:
 				wm_state->wm[level].cursor = plane->wm.fifo_size -
@@ -1133,6 +1144,7 @@ static void vlv_compute_wm(struct intel_crtc *crtc)
 	struct intel_plane *plane;
 	int sr_fifo_size = INTEL_INFO(dev)->num_pipes * 512 - 1;
 	int level;
+	enum drm_plane_type plane_type;
 
 	memset(wm_state, 0, sizeof(*wm_state));
 
@@ -1163,10 +1175,15 @@ static void vlv_compute_wm(struct intel_crtc *crtc)
 		if (!state->visible)
 			continue;
 
+		plane_type = plane->base.type;
+		if (plane_type == DRM_PLANE_TYPE_CURSOR &&
+		    !pipe_has_cursor_plane(to_i915(dev), plane->pipe))
+			plane_type = DRM_PLANE_TYPE_OVERLAY;
+
 		/* normal watermarks */
 		for (level = 0; level < wm_state->num_levels; level++) {
 			int wm = vlv_compute_wm_level(plane, crtc, state, level);
-			int max_wm = plane->base.type == DRM_PLANE_TYPE_CURSOR ? 63 : 511;
+			int max_wm = plane_type == DRM_PLANE_TYPE_CURSOR ? 63 : 511;
 
 			/* hack */
 			if (WARN_ON(level == 0 && wm > max_wm))
@@ -1175,7 +1192,7 @@ static void vlv_compute_wm(struct intel_crtc *crtc)
 			if (wm > plane->wm.fifo_size)
 				break;
 
-			switch (plane->base.type) {
+			switch (plane_type) {
 				int sprite;
 			case DRM_PLANE_TYPE_CURSOR:
 				wm_state->wm[level].cursor = wm;
@@ -1196,7 +1213,7 @@ static void vlv_compute_wm(struct intel_crtc *crtc)
 			continue;
 
 		/* maxfifo watermarks */
-		switch (plane->base.type) {
+		switch (plane_type) {
 			int sprite, level;
 		case DRM_PLANE_TYPE_CURSOR:
 			for (level = 0; level < wm_state->num_levels; level++)
@@ -1237,9 +1254,16 @@ static void vlv_pipe_set_fifo_size(struct intel_crtc *crtc)
 	struct drm_i915_private *dev_priv = to_i915(dev);
 	struct intel_plane *plane;
 	int sprite0_start = 0, sprite1_start = 0, fifo_size = 0;
+	enum drm_plane_type plane_type;
 
 	for_each_intel_plane_on_crtc(dev, crtc, plane) {
-		if (plane->base.type == DRM_PLANE_TYPE_CURSOR) {
+		plane_type = plane->base.type;
+
+		if (plane_type == DRM_PLANE_TYPE_CURSOR &&
+		    !pipe_has_cursor_plane(to_i915(dev), plane->pipe))
+			plane_type = DRM_PLANE_TYPE_OVERLAY;
+
+		if (plane_type == DRM_PLANE_TYPE_CURSOR) {
 			WARN_ON(plane->wm.fifo_size != 63);
 			continue;
 		}
@@ -1796,6 +1820,7 @@ struct ilk_wm_maximums {
 /* used in computing the new watermarks state */
 struct intel_wm_config {
 	unsigned int num_pipes_active;
+	bool wm_enabled;
 	bool sprites_enabled;
 	bool sprites_scaled;
 };
@@ -2345,6 +2370,27 @@ static void skl_setup_wm_latency(struct drm_device *dev)
 	intel_print_wm_latency(dev, "Gen9 Plane", dev_priv->wm.skl_latency);
 }
 
+static inline void set_config_wm_enabled(struct intel_wm_config *config)
+{
+
+	switch (i915.enable_watermark) {
+		case 0:
+			config->wm_enabled = false;
+			break;
+		case 1:
+			config->wm_enabled = true;
+			break;
+		case 2:
+			/* Disable watermarks when more than one screen enabled*/
+			config->wm_enabled = config->num_pipes_active < 2;
+			break;
+		default:
+			DRM_ERROR("Invalid value set for i915.enable_watermark, defaulting to 1.\n");
+			i915.enable_watermark = 1;
+			config->wm_enabled = true;
+	}
+}
+
 static void ilk_compute_wm_config(struct drm_device *dev,
 				  struct intel_wm_config *config)
 {
@@ -2361,6 +2407,8 @@ static void ilk_compute_wm_config(struct drm_device *dev,
 		config->sprites_scaled |= wm->sprites_scaled;
 		config->num_pipes_active++;
 	}
+
+	set_config_wm_enabled(config);
 }
 
 /* Compute new watermarks for the pipe */
@@ -2547,6 +2595,7 @@ static unsigned int ilk_wm_lp_latency(struct drm_device *dev, int level)
 }
 
 static void ilk_compute_wm_results(struct drm_device *dev,
+				   struct intel_wm_config *config,
 				   const struct intel_pipe_wm *merged,
 				   enum intel_ddb_partitioning partitioning,
 				   struct ilk_wm_values *results)
@@ -2574,7 +2623,7 @@ static void ilk_compute_wm_results(struct drm_device *dev,
 			(r->pri_val << WM1_LP_SR_SHIFT) |
 			r->cur_val;
 
-		if (r->enable)
+		if (r->enable && config->wm_enabled)
 			results->wm_lp[wm_lp - 1] |= WM1_LP_SR_EN;
 
 		if (INTEL_INFO(dev)->gen >= 8)
@@ -2889,7 +2938,15 @@ void skl_ddb_get_hw_state(struct drm_i915_private *dev_priv,
 	int plane;
 	u32 val;
 
+	memset(ddb, 0, sizeof(*ddb));
+
 	for_each_pipe(dev_priv, pipe) {
+		enum intel_display_power_domain power_domain;
+
+		power_domain = POWER_DOMAIN_PIPE(pipe);
+		if (!intel_display_power_get_if_enabled(dev_priv, power_domain))
+			continue;
+
 		for_each_plane(dev_priv, pipe, plane) {
 			val = I915_READ(PLANE_BUF_CFG(pipe, plane));
 			skl_ddb_entry_init_from_hw(&ddb->plane[pipe][plane],
@@ -2899,6 +2956,8 @@ void skl_ddb_get_hw_state(struct drm_i915_private *dev_priv,
 		val = I915_READ(CUR_BUF_CFG(pipe));
 		skl_ddb_entry_init_from_hw(&ddb->plane[pipe][PLANE_CURSOR],
 					   val);
+
+		intel_display_power_put(dev_priv, power_domain);
 	}
 }
 
@@ -3136,6 +3195,8 @@ static void skl_compute_wm_global_parameters(struct drm_device *dev,
 		config->sprites_enabled |= intel_plane->wm.enabled;
 		config->sprites_scaled |= intel_plane->wm.scaled;
 	}
+
+	set_config_wm_enabled(config);
 }
 
 static void skl_compute_wm_pipe_parameters(struct drm_crtc *crtc,
@@ -3355,6 +3416,7 @@ static void skl_compute_pipe_wm(struct drm_crtc *crtc,
 }
 
 static void skl_compute_wm_results(struct drm_device *dev,
+				   struct intel_wm_config *config,
 				   struct skl_pipe_wm_parameters *p,
 				   struct skl_pipe_wm *p_wm,
 				   struct skl_wm_values *r,
@@ -3372,7 +3434,8 @@ static void skl_compute_wm_results(struct drm_device *dev,
 			temp |= p_wm->wm[level].plane_res_l[i] <<
 					PLANE_WM_LINES_SHIFT;
 			temp |= p_wm->wm[level].plane_res_b[i];
-			if (p_wm->wm[level].plane_en[i])
+			if (p_wm->wm[level].plane_en[i]
+			    && (config->wm_enabled || level == 0))
 				temp |= PLANE_WM_EN;
 
 			r->plane[pipe][i][level] = temp;
@@ -3383,7 +3446,8 @@ static void skl_compute_wm_results(struct drm_device *dev,
 		temp |= p_wm->wm[level].plane_res_l[PLANE_CURSOR] << PLANE_WM_LINES_SHIFT;
 		temp |= p_wm->wm[level].plane_res_b[PLANE_CURSOR];
 
-		if (p_wm->wm[level].plane_en[PLANE_CURSOR])
+		if (p_wm->wm[level].plane_en[PLANE_CURSOR]
+		    && (config->wm_enabled || level == 0))
 			temp |= PLANE_WM_EN;
 
 		r->plane[pipe][PLANE_CURSOR][level] = temp;
@@ -3395,7 +3459,8 @@ static void skl_compute_wm_results(struct drm_device *dev,
 		temp = 0;
 		temp |= p_wm->trans_wm.plane_res_l[i] << PLANE_WM_LINES_SHIFT;
 		temp |= p_wm->trans_wm.plane_res_b[i];
-		if (p_wm->trans_wm.plane_en[i])
+		if (p_wm->trans_wm.plane_en[i]
+		    && config->wm_enabled)
 			temp |= PLANE_WM_EN;
 
 		r->plane_trans[pipe][i] = temp;
@@ -3404,7 +3469,8 @@ static void skl_compute_wm_results(struct drm_device *dev,
 	temp = 0;
 	temp |= p_wm->trans_wm.plane_res_l[PLANE_CURSOR] << PLANE_WM_LINES_SHIFT;
 	temp |= p_wm->trans_wm.plane_res_b[PLANE_CURSOR];
-	if (p_wm->trans_wm.plane_en[PLANE_CURSOR])
+	if (p_wm->trans_wm.plane_en[PLANE_CURSOR]
+	    && config->wm_enabled)
 		temp |= PLANE_WM_EN;
 
 	r->plane_trans[pipe][PLANE_CURSOR] = temp;
@@ -3632,8 +3698,8 @@ static void skl_update_other_pipe_wm(struct drm_device *dev,
 	 * enabled crtcs will keep the same allocation and we don't need to
 	 * recompute anything for them.
 	 */
-	if (!skl_ddb_allocation_changed(&r->ddb, this_crtc))
-		return;
+	if (skl_ddb_allocation_changed(&r->ddb, this_crtc))
+		DRM_DEBUG_DRIVER("DDB allocation changed for pipe %d.\n",this_crtc->pipe);
 
 	/*
 	 * Otherwise, because of this_crtc being freshly enabled/disabled, the
@@ -3662,7 +3728,7 @@ static void skl_update_other_pipe_wm(struct drm_device *dev,
 		 */
 		WARN_ON(!wm_changed);
 
-		skl_compute_wm_results(dev, &params, &pipe_wm, r, intel_crtc);
+		skl_compute_wm_results(dev, config, &params, &pipe_wm, r, intel_crtc);
 		r->dirty[intel_crtc->pipe] = true;
 	}
 }
@@ -3705,11 +3771,9 @@ static void skl_update_wm(struct drm_crtc *crtc)
 
 	skl_compute_wm_global_parameters(dev, &config);
 
-	if (!skl_update_pipe_wm(crtc, &params, &config,
-				&results->ddb, &pipe_wm))
-		return;
+	skl_update_pipe_wm(crtc, &params, &config, &results->ddb, &pipe_wm);
 
-	skl_compute_wm_results(dev, &params, &pipe_wm, results, intel_crtc);
+	skl_compute_wm_results(dev, &config, &params, &pipe_wm, results, intel_crtc);
 	results->dirty[intel_crtc->pipe] = true;
 
 	skl_update_other_pipe_wm(dev, crtc, &config, results);
@@ -3794,7 +3858,7 @@ static void ilk_update_wm(struct drm_crtc *crtc)
 	partitioning = (best_lp_wm == &lp_wm_1_2) ?
 		       INTEL_DDB_PART_1_2 : INTEL_DDB_PART_5_6;
 
-	ilk_compute_wm_results(dev, best_lp_wm, partitioning, &results);
+	ilk_compute_wm_results(dev, &config, best_lp_wm, partitioning, &results);
 
 	ilk_write_wm_values(dev_priv, &results);
 }
@@ -4063,11 +4127,18 @@ void vlv_wm_get_hw_state(struct drm_device *dev)
 	struct intel_plane *plane;
 	enum pipe pipe;
 	u32 val;
+	enum drm_plane_type plane_type;
 
 	vlv_read_wm_values(dev_priv, wm);
 
 	for_each_intel_plane(dev, plane) {
-		switch (plane->base.type) {
+		plane_type = plane->base.type;
+
+		if (plane_type == DRM_PLANE_TYPE_CURSOR &&
+		    !pipe_has_cursor_plane(to_i915(dev), plane->pipe))
+			plane_type = DRM_PLANE_TYPE_OVERLAY;
+
+		switch (plane_type) {
 			int sprite;
 		case DRM_PLANE_TYPE_CURSOR:
 			plane->wm.fifo_size = 63;
@@ -7374,4 +7445,5 @@ void intel_pm_setup(struct drm_device *dev)
 	INIT_LIST_HEAD(&dev_priv->rps.mmioflips.link);
 
 	dev_priv->pm.suspended = false;
+	atomic_set(&dev_priv->pm.wakeref_count, 0);
 }

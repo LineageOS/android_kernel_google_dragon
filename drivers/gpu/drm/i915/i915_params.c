@@ -41,6 +41,7 @@ struct i915_params i915 __read_mostly = {
 	.preliminary_hw_support = IS_ENABLED(CONFIG_DRM_I915_PRELIMINARY_HW_SUPPORT),
 	.disable_power_well = -1,
 	.enable_ips = 1,
+	.enable_watermark = 2,
 	.fastboot = 0,
 	.prefault_disable = 0,
 	.load_detect_test = 0,
@@ -53,6 +54,7 @@ struct i915_params i915 __read_mostly = {
 	.mmio_debug = 0,
 	.verbose_state_checks = 1,
 	.edp_vswing = 0,
+	.enable_dp_mst = true,
 };
 
 module_param_named(modeset, i915.modeset, int, 0400);
@@ -142,6 +144,9 @@ MODULE_PARM_DESC(disable_power_well,
 module_param_named(enable_ips, i915.enable_ips, int, 0600);
 MODULE_PARM_DESC(enable_ips, "Enable IPS (default: true)");
 
+module_param_named_unsafe(enable_watermark, i915.enable_watermark, int, 0600);
+MODULE_PARM_DESC(enable_watermark, "Enable Watermark (default: 1)");
+
 module_param_named(fastboot, i915.fastboot, bool, 0600);
 MODULE_PARM_DESC(fastboot,
 	"Try to skip unnecessary mode sets at boot time (default: false)");
@@ -193,3 +198,7 @@ MODULE_PARM_DESC(edp_vswing,
 		 "Ignore/Override vswing pre-emph table selection from VBT "
 		 "(0=use value from vbt [default], 1=low power swing(200mV),"
 		 "2=default swing(400mV))");
+
+module_param_named_unsafe(enable_dp_mst, i915.enable_dp_mst, bool, 0600);
+MODULE_PARM_DESC(enable_dp_mst,
+	"Enable multi-stream transport (MST) for new DisplayPort sinks. (default: true)");

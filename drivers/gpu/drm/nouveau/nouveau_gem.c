@@ -200,30 +200,46 @@ alloc_err:
 }
 
 static int
-nouveau_gem_init_tags(struct nouveau_drm *drm, struct nouveau_bo *nvbo)
+nouveau_gem_init_tags(struct nouveau_drm *drm, struct nouveau_bo *nvbo,
+		      u32 *memtype)
 {
 	struct nvkm_mmu *mmu = nvxx_mmu(&drm->device);
+	struct nvkm_fb *fb = nvxx_fb(&drm->device);
 	struct ttm_mem_reg *mem = &(nvbo->bo.mem);
 	struct nvkm_mem *node = mem->mm_node;
-	u32 type = (node->memtype & 0x0ff);
+	u32 type = memtype ? *memtype : node->memtype;
 	int ret = -EINVAL;
 
 	if (!mmu->uc_type)
 		return 0;
+
+	if (!fb->ctag_granularity)
+		return ret;
 
 	if (mmu->uc_type(mmu, type) != type) {
 
 		/* compression only works with lpages */
 		if (mem->page_alignment ==
 				(1 << (mmu->lpg_shift - mmu->spg_shift))) {
-			int n = mem->num_pages >> (mmu->lpg_shift - mmu->spg_shift);
+			int n;
+			u32 ctag_granularity;
+
+			ctag_granularity = fb->ctag_granularity >> mmu->spg_shift;
+			if (!ctag_granularity)
+				return ret;
+
+			n = DIV_ROUND_UP(mem->num_pages, ctag_granularity);
 			ret = nouveau_gem_alloc_tags(drm, nvbo, n, node);
 		}
 
 		if (unlikely(ret))
 			type = mmu->uc_type(mmu, type);
 	}
-	node->memtype = type;
+
+	if (memtype)
+		*memtype = type;
+	else
+		node->memtype = type;
 
 	return 0;
 }
@@ -248,7 +264,9 @@ static void gem_unmap_work(struct work_struct *__work)
 
 	fobj = reservation_object_get_list(resv);
 
+	mutex_lock(&nvbo->vma_list_lock);
 	list_del(&vma->head);
+	mutex_unlock(&nvbo->vma_list_lock);
 
 	if (fobj && fobj->shared_count > 1)
 		ttm_bo_wait(&nvbo->bo, true, false, false);
@@ -311,6 +329,7 @@ nouveau_gem_object_unmap(struct nouveau_bo *nvbo, struct nvkm_vma *vma)
 	INIT_WORK(&del_work->work, gem_unmap_work);
 	del_work->vma = vma;
 	del_work->nvbo = nvbo;
+	vma->unmap_pending = true;
 
 	queue_work(drm->gem_unmap_wq, &del_work->work);
 }
@@ -343,6 +362,17 @@ nouveau_gem_object_close(struct drm_gem_object *gem, struct drm_file *file_priv)
 			}
 		}
 	}
+
+	mutex_lock(&nvbo->vma_list_lock);
+	list_for_each_entry(vma, &nvbo->vma_list, head)
+		if (!vma->implicit &&
+		    (vma->vm == cli->vm) &&
+		    !vma->unmap_pending) {
+			nouveau_gem_object_unmap(nvbo, vma);
+			drm_gem_object_unreference(&nvbo->gem);
+		}
+	mutex_unlock(&nvbo->vma_list_lock);
+
 	ttm_bo_unreserve(&nvbo->bo);
 }
 
@@ -391,7 +421,7 @@ nouveau_gem_ioctl_set_tiling(struct drm_device *dev, void *data,
 		/* Need to rewrite page tables */
 		mem->memtype = (nvbo->tile_flags >> 8) & 0xff;
 		if (gem->import_attach) {
-			ret = nouveau_gem_init_tags(drm, nvbo);
+			ret = nouveau_gem_init_tags(drm, nvbo, NULL);
 			if (ret)
 				NV_PRINTK(error, cli, "failed to allocate tagline\n");
 		}
@@ -615,7 +645,7 @@ nouveau_gem_ioctl_set_info(struct drm_device *dev, void *data,
 		mem->memtype = (nvbo->tile_flags >> 8) & 0xff;
 		mem->cached = nvbo->gpu_cacheable;
 		if (gem->import_attach) {
-			ret = nouveau_gem_init_tags(drm, nvbo);
+			ret = nouveau_gem_init_tags(drm, nvbo, NULL);
 			if (ret)
 				NV_PRINTK(error, cli, "failed to allocate tagline\n");
 		}
@@ -1155,6 +1185,23 @@ nouveau_gem_pushbuf_queue_head(struct nouveau_channel *chan)
 	return pb_data;
 }
 
+void
+nouveau_gem_pushbuf_drain_queue(struct nouveau_channel *chan)
+{
+	struct nouveau_cli *cli = (void *)nvif_client(chan->object);
+	struct nouveau_pushbuf_data *pb_data, *tmp;
+
+	NV_PRINTK(error, cli, "draining pushbuf queue for ch %d\n",
+			chan->chid);
+
+	spin_lock(&chan->pushbuf_lock);
+	list_for_each_entry_safe(pb_data, tmp, &chan->pushbuf_queue, queue) {
+		list_del(&pb_data->queue);
+		nouveau_free_pushbuf_data(pb_data);
+	}
+	spin_unlock(&chan->pushbuf_lock);
+}
+
 int
 nouveau_gem_pushbuf_queue_kthread_fn(void *data)
 {
@@ -1241,6 +1288,7 @@ nouveau_gem_ioctl_pushbuf_2(struct drm_device *dev, void *data,
 	struct nouveau_channel *chan = NULL;
 	struct sync_fence *input_fence = NULL;
 	struct nouveau_fence *fence = NULL;
+	struct fence *f = NULL;
 	uint32_t *push = NULL;
 	struct nouveau_pushbuf_data *pb_data = NULL;
 	int ret = 0;
@@ -1323,7 +1371,7 @@ nouveau_gem_ioctl_pushbuf_2(struct drm_device *dev, void *data,
 	nouveau_fence_init(fence, chan);
 
 	if (req->flags & NOUVEAU_GEM_PUSHBUF_2_FENCE_EMIT) {
-		struct fence *f = fence_get(&fence->base);
+		f = fence_get(&fence->base);
 		ret = nouveau_fence_install(f, "nv-pushbuf", &req->fence);
 
 		if (ret) {
@@ -1345,14 +1393,27 @@ nouveau_gem_ioctl_pushbuf_2(struct drm_device *dev, void *data,
 	pb_data->bo = bo;
 
 	spin_lock(&chan->pushbuf_lock);
+	/*
+	 * If recovery is in progress, then the installed fence earlier
+	 * won't be signaled. We have to remove the fence then.
+	 */
+	if (chan->faulty) {
+		ret = -ENODEV;
+		spin_unlock(&chan->pushbuf_lock);
+		goto out_recovery;
+	}
 	list_add_tail(&pb_data->queue, &chan->pushbuf_queue);
 	spin_unlock(&chan->pushbuf_lock);
+
 	ret = nouveau_abi16_put(abi16, ret);
 
 	wake_up(&chan->pushbuf_waitqueue);
 
 	return ret;
 
+out_recovery:
+	if (f)
+		fence_signal(&fence->base);
 out_fence:
 	nouveau_fence_unref(&fence);
 out_input_fence:
@@ -1694,7 +1755,8 @@ nouveau_gem_ioctl_as_alloc(struct drm_device *dev, void *data,
 		return nouveau_abi16_put(abi16, -EINVAL);
 
 	ret = nvkm_vm_as_alloc(cli->vm, align, req->pages * req->page_size,
-			       page_shift, &req->address);
+			       page_shift, &req->address,
+			       req->flags & NOUVEAU_GEM_AS_SPARSE);
 
 	return nouveau_abi16_put(abi16, ret);
 }
@@ -1717,4 +1779,215 @@ nouveau_gem_ioctl_as_free(struct drm_device *dev, void *data,
 	ret = nvkm_vm_as_free(cli->vm, req->address);
 
 	return nouveau_abi16_put(abi16, ret);
+}
+
+int
+nouveau_gem_ioctl_map(struct drm_device *dev, void *data,
+		      struct drm_file *file_priv)
+{
+	struct nouveau_drm *drm = nouveau_drm(dev);
+	struct nouveau_cli *cli = nouveau_cli(file_priv);
+	struct nvkm_fb *pfb = nvxx_fb(&drm->device);
+	struct drm_nouveau_gem_map *req = data;
+	struct drm_gem_object *gem;
+	struct nouveau_bo *nvbo;
+	struct nvkm_vma *vma;
+	unsigned old_page_shift;
+	bool gpu_cacheable = !(req->domain & NOUVEAU_GEM_DOMAIN_COHERENT);
+	struct nvkm_mem *mem;
+	struct nvkm_as *as;
+	int ret = 0;
+	u32 memtype = 0x0;
+
+	if (!pfb->memtype_valid(pfb, req->tile_flags)) {
+		NV_PRINTK(error, cli, "bad memtype: 0x%08x\n", req->tile_flags);
+		return -EINVAL;
+	}
+
+	gem = drm_gem_object_lookup(dev, file_priv, req->handle);
+	if (!gem)
+		return -ENOENT;
+
+	nvbo = nouveau_gem_object(gem);
+
+	ret = ttm_bo_reserve(&nvbo->bo, false, false, false, NULL);
+	if (ret)
+		return ret;
+
+	old_page_shift = nvbo->page_shift;
+
+	/*
+	 * Does this mapping already exist?  If so, we're done.  Note that
+	 * we are keeping the gem object reference.
+	 */
+	vma = nouveau_bo_subvma_find(nvbo, cli->vm, req->offset,
+				     req->delta, req->length);
+	if (vma) {
+		vma->refcount++;
+		req->offset = vma->offset;
+		ttm_bo_unreserve(&nvbo->bo);
+		return ret;
+	}
+
+	/*
+	 * Only need to check for address space allocation if this is a fixed
+	 * address mapping.
+	 */
+	if (req->offset) {
+		/*
+		 * If this offset falls within an address space allocation,
+		 * then honor the address space allocation's alignment request
+		 * (as->align_shift).  This may result in changing the nvbo to
+		 * map with small page size when previously it was mapped with
+		 * large page size.
+		 *
+		 * Note that if the nvbo was originally mapped with small page
+		 * size (if, for example, its size was not a multiple of large
+		 * page size), we cannot just promote to large page size.
+		 */
+		as = nvkm_vm_find_as(cli->vm, req->offset);
+		if (as)
+			nvbo->page_shift = min(nvbo->page_shift,
+					       as->align_shift);
+	}
+
+	/* Make our new vma. */
+	vma = kzalloc(sizeof(*vma), GFP_KERNEL);
+	if (!vma) {
+		ret = -ENOMEM;
+		goto error;
+	}
+
+	mem = nvbo->bo.mem.mm_node;
+	memtype = (req->tile_flags >> 8) & 0xff;
+
+	/*
+	 * Only update nvbo and memory node for the whole buffer.  If this
+	 * is for a partial mapping, we update the cached status in the vma
+	 * instead.
+	 */
+	if (req->length == (mem->size << PAGE_SHIFT)) {
+		nvbo->tile_mode = req->tile_mode;
+		nvbo->tile_flags = req->tile_flags;
+		mem->memtype = memtype;
+		nvbo->gpu_cacheable = gpu_cacheable;
+		mem->cached = nvbo->gpu_cacheable;
+		vma->cached = NVKM_VMA_CACHETYPE_INHERIT_FROM_MEM;
+	} else {
+		vma->cached = gpu_cacheable ? NVKM_VMA_CACHETYPE_CACHED :
+			NVKM_VMA_CACHETYPE_NONCACHED;
+	}
+
+
+	if (gem->import_attach && !mem->tag) {
+		ret = nouveau_gem_init_tags(drm, nvbo, &memtype);
+		if (ret)
+			NV_PRINTK(error, cli, "failed to allocate tagline\n");
+	}
+
+	ret = nouveau_bo_subvma_add(nvbo, cli->vm, vma, req->offset,
+				    req->delta, req->length, memtype,
+				    true);
+	if (!ret)
+		goto success;
+
+	/*
+	 * We could have failed if there is an unmap pending for a given
+	 * address, and we ask for that address again, so flush the pending
+	 * unmaps and try again.
+	 */
+	flush_workqueue(drm->gem_unmap_wq);
+	ret = nouveau_bo_subvma_add(nvbo, cli->vm, vma, req->offset,
+				    req->delta, req->length, memtype,
+				    true);
+	if (ret)
+		goto error;
+
+success:
+	/*
+	 * If input offset was zero, we'll get an arbitrary address back
+	 * from nouveau_bo_subvma_add(), so report that back up the stack.
+	 */
+	req->offset = vma->offset;
+
+	/*
+	 * On success, we delete the old vma, and hang on to the gem object
+	 * reference so that while this mapping exists, we don't free the bo.
+	 *
+	 * Do we still have the start of nvbo implicit mapping in place?  If
+	 * so, get rid of it.
+	 */
+	vma = nouveau_bo_vma_find(nvbo, cli->vm);
+	if (vma) {
+		nouveau_cancel_defer_vm_map(vma, nvbo);
+		nouveau_bo_vma_del(nvbo, vma);
+		kfree(vma);
+	}
+
+	ttm_bo_unreserve(&nvbo->bo);
+
+	return ret;
+
+error:
+	/* On failure, give up the gem object reference, delete the new vma. */
+	kfree(vma);
+	ttm_bo_unreserve(&nvbo->bo);
+	drm_gem_object_unreference_unlocked(gem);
+
+	return ret;
+}
+
+int
+nouveau_gem_ioctl_unmap(struct drm_device *dev, void *data,
+			struct drm_file *file_priv)
+{
+	struct nouveau_drm *drm = nouveau_drm(dev);
+	struct nouveau_cli *cli = nouveau_cli(file_priv);
+	struct drm_nouveau_gem_unmap *req = data;
+	struct drm_gem_object *gem;
+	struct nouveau_bo *nvbo;
+	struct nvkm_vma *vma;
+	int ret = 0;
+
+	gem = drm_gem_object_lookup(dev, file_priv, req->handle);
+	if (!gem)
+		return -ENOENT;
+
+	nvbo = nouveau_gem_object(gem);
+
+	ret = ttm_bo_reserve(&nvbo->bo, false, false, false, NULL);
+	if (ret)
+		return ret;
+
+	vma = nouveau_bo_subvma_find_offset(nvbo, cli->vm, req->offset);
+	if (!vma) {
+		ret = -ENOENT;
+		goto error;
+	}
+
+	if (--vma->refcount == 0) {
+		struct nvkm_as *as = vma->as;
+
+		nouveau_gem_object_unmap(nvbo, vma);
+		/*
+		 * If this vma is part of an address space allocation
+		 * that has sparse textures turned on, we can't defer
+		 * the unmap.  Easiest way to do that is to just flush
+		 * the unmap queue.
+		 */
+		if (as && as->sparse)
+			flush_workqueue(drm->gem_unmap_wq);
+	}
+
+	/* Release the reference we kept from the map operation. */
+	drm_gem_object_unreference_unlocked(gem);
+
+error:
+	/*
+	 * Finally, in any case, release the reference acquired by this
+	 * function's call to drm_gem_object_lookup().
+	 */
+	ttm_bo_unreserve(&nvbo->bo);
+	drm_gem_object_unreference_unlocked(gem);
+	return ret;
 }

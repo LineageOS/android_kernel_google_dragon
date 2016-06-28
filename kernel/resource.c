@@ -357,7 +357,7 @@ static int find_next_iomem_res(struct resource *res, char *name,
 	read_lock(&resource_lock);
 
 	for (p = iomem_resource.child; p; p = next_resource(p, sibling_only)) {
-		if (p->flags != res->flags)
+		if ((p->flags & res->flags) != res->flags)
 			continue;
 		if (name && strcmp(p->name, name))
 			continue;
@@ -491,41 +491,57 @@ int __weak page_is_ram(unsigned long pfn)
 }
 EXPORT_SYMBOL_GPL(page_is_ram);
 
-/*
- * Search for a resouce entry that fully contains the specified region.
- * If found, return 1 if it is RAM, 0 if not.
- * If not found, or region is not fully contained, return -1
+/**
+ * region_intersects() - determine intersection of region with known resources
+ * @start: region start address
+ * @size: size of region
+ * @flags: flags of resource (in iomem_resource)
+ * @desc: descriptor of resource (in iomem_resource) or IORES_DESC_NONE
  *
- * Used by the ioremap functions to ensure the user is not remapping RAM and is
- * a vast speed up over walking through the resource table page by page.
+ * Check if the specified region partially overlaps or fully eclipses a
+ * resource identified by @flags and @desc (optional with IORES_DESC_NONE).
+ * Return REGION_DISJOINT if the region does not overlap @flags/@desc,
+ * return REGION_MIXED if the region overlaps @flags/@desc and another
+ * resource, and return REGION_INTERSECTS if the region overlaps @flags/@desc
+ * and no other defined resource. Note that REGION_INTERSECTS is also
+ * returned in the case when the specified region overlaps RAM and undefined
+ * memory holes.
+ *
+ * region_intersect() is used by memory remapping functions to ensure
+ * the user is not remapping RAM and is a vast speed up over walking
+ * through the resource table page by page.
  */
-int region_is_ram(resource_size_t start, unsigned long size)
+int region_intersects(resource_size_t start, size_t size, unsigned long flags,
+		      unsigned long desc)
 {
-	struct resource *p;
 	resource_size_t end = start + size - 1;
-	int flags = IORESOURCE_MEM | IORESOURCE_BUSY;
-	const char *name = "System RAM";
-	int ret = -1;
+	int type = 0; int other = 0;
+	struct resource *p;
 
 	read_lock(&resource_lock);
 	for (p = iomem_resource.child; p ; p = p->sibling) {
-		if (end < p->start)
-			continue;
+		bool is_type = (((p->flags & flags) == flags) &&
+				((desc == IORES_DESC_NONE) ||
+				 (desc == p->desc)));
 
-		if (p->start <= start && end <= p->end) {
-			/* resource fully contains region */
-			if ((p->flags != flags) || strcmp(p->name, name))
-				ret = 0;
-			else
-				ret = 1;
-			break;
-		}
-		if (p->end < start)
-			break;	/* not found */
+		if (start >= p->start && start <= p->end)
+			is_type ? type++ : other++;
+		if (end >= p->start && end <= p->end)
+			is_type ? type++ : other++;
+		if (p->start >= start && p->end <= end)
+			is_type ? type++ : other++;
 	}
 	read_unlock(&resource_lock);
-	return ret;
+
+	if (other == 0)
+		return type ? REGION_INTERSECTS : REGION_DISJOINT;
+
+	if (type)
+		return REGION_MIXED;
+
+	return REGION_DISJOINT;
 }
+EXPORT_SYMBOL_GPL(region_intersects);
 
 void __weak arch_remove_reservations(struct resource *avail)
 {
@@ -936,6 +952,7 @@ static void __init __reserve_region_with_split(struct resource *root,
 	res->start = start;
 	res->end = end;
 	res->flags = IORESOURCE_BUSY;
+	res->desc = IORES_DESC_NONE;
 
 	while (1) {
 
@@ -970,6 +987,7 @@ static void __init __reserve_region_with_split(struct resource *root,
 				next_res->start = conflict->end + 1;
 				next_res->end = end;
 				next_res->flags = IORESOURCE_BUSY;
+				next_res->desc = IORES_DESC_NONE;
 			}
 		} else {
 			res->start = conflict->end + 1;
@@ -1061,8 +1079,9 @@ struct resource * __request_region(struct resource *parent,
 	res->name = name;
 	res->start = start;
 	res->end = start + n - 1;
-	res->flags = resource_type(parent);
+	res->flags = resource_type(parent) | resource_ext_type(parent);
 	res->flags |= IORESOURCE_BUSY | flags;
+	res->desc = IORES_DESC_NONE;
 
 	write_lock(&resource_lock);
 
@@ -1257,6 +1276,7 @@ int release_mem_region_adjustable(struct resource *parent,
 			new_res->start = end + 1;
 			new_res->end = res->end;
 			new_res->flags = res->flags;
+			new_res->desc = res->desc;
 			new_res->parent = res->parent;
 			new_res->sibling = res->sibling;
 			new_res->child = NULL;
@@ -1432,6 +1452,7 @@ static int __init reserve_setup(char *str)
 			res->start = io_start;
 			res->end = io_start + io_num - 1;
 			res->flags = IORESOURCE_BUSY;
+			res->desc = IORES_DESC_NONE;
 			res->child = NULL;
 			if (request_resource(res->start >= 0x10000 ? &iomem_resource : &ioport_resource, res) == 0)
 				reserved = x+1;

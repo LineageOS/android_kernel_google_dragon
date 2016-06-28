@@ -28,6 +28,7 @@
 
 #include <drm/drmP.h>
 #include <drm/drm_atomic.h>
+#include <drm/drm_mode.h>
 #include <drm/drm_plane_helper.h>
 
 /**
@@ -381,6 +382,59 @@ int drm_atomic_set_mode_prop_for_crtc(struct drm_crtc_state *state,
 EXPORT_SYMBOL(drm_atomic_set_mode_prop_for_crtc);
 
 /**
+ * drm_atomic_replace_property_blob - replace a blob property
+ * @blob: a pointer to the member blob to be replaced
+ * @new_blob: the new blob to replace with
+ * @expected_size: the expected size of the new blob
+ * @replaced: whether the blob has been replaced
+ *
+ * RETURNS:
+ * Zero on success, error code on failure
+ */
+static void
+drm_atomic_replace_property_blob(struct drm_property_blob **blob,
+				 struct drm_property_blob *new_blob,
+				 bool *replaced)
+{
+	struct drm_property_blob *old_blob = *blob;
+
+	if (old_blob == new_blob)
+		return;
+
+	if (old_blob)
+		drm_property_unreference_blob(old_blob);
+	if (new_blob)
+		drm_property_reference_blob(new_blob);
+	*blob = new_blob;
+	*replaced = true;
+
+	return;
+}
+
+static int
+drm_atomic_replace_property_blob_from_id(struct drm_crtc *crtc,
+					 struct drm_property_blob **blob,
+					 uint64_t blob_id,
+					 ssize_t expected_size,
+					 bool *replaced)
+{
+	struct drm_device *dev = crtc->dev;
+	struct drm_property_blob *new_blob = NULL;
+
+	if (blob_id != 0) {
+		new_blob = drm_property_lookup_blob(dev, blob_id);
+		if (new_blob == NULL)
+			return -EINVAL;
+		if (expected_size > 0 && expected_size != new_blob->length)
+			return -EINVAL;
+	}
+
+	drm_atomic_replace_property_blob(blob, new_blob, replaced);
+
+	return 0;
+}
+
+/**
  * drm_atomic_crtc_set_property - set property on CRTC
  * @crtc: the drm CRTC to set a property on
  * @state: the state object to update with the new property value
@@ -402,6 +456,7 @@ int drm_atomic_crtc_set_property(struct drm_crtc *crtc,
 {
 	struct drm_device *dev = crtc->dev;
 	struct drm_mode_config *config = &dev->mode_config;
+	bool replaced = false;
 	int ret;
 
 	if (property == config->prop_active)
@@ -413,8 +468,31 @@ int drm_atomic_crtc_set_property(struct drm_crtc *crtc,
 		if (mode)
 			drm_property_unreference_blob(mode);
 		return ret;
-	}
-	else if (crtc->funcs->atomic_set_property)
+	} else if (property == config->degamma_lut_property) {
+		ret = drm_atomic_replace_property_blob_from_id(crtc,
+					&state->degamma_lut,
+					val,
+					-1,
+					&replaced);
+		state->color_mgmt_changed = replaced;
+		return ret;
+	} else if (property == config->ctm_property) {
+		ret = drm_atomic_replace_property_blob_from_id(crtc,
+					&state->ctm,
+					val,
+					sizeof(struct drm_color_ctm),
+					&replaced);
+		state->color_mgmt_changed = replaced;
+		return ret;
+	} else if (property == config->gamma_lut_property) {
+		ret = drm_atomic_replace_property_blob_from_id(crtc,
+					&state->gamma_lut,
+					val,
+					-1,
+					&replaced);
+		state->color_mgmt_changed = replaced;
+		return ret;
+	} else if (crtc->funcs->atomic_set_property)
 		return crtc->funcs->atomic_set_property(crtc, state, property, val);
 	else
 		return -EINVAL;
@@ -440,6 +518,12 @@ int drm_atomic_crtc_get_property(struct drm_crtc *crtc,
 		*val = state->active;
 	else if (property == config->prop_mode_id)
 		*val = (state->mode_blob) ? state->mode_blob->base.id : 0;
+	else if (property == config->degamma_lut_property)
+		*val = (state->degamma_lut) ? state->degamma_lut->base.id : 0;
+	else if (property == config->ctm_property)
+		*val = (state->ctm) ? state->ctm->base.id : 0;
+	else if (property == config->gamma_lut_property)
+		*val = (state->gamma_lut) ? state->gamma_lut->base.id : 0;
 	else if (crtc->funcs->atomic_get_property)
 		return crtc->funcs->atomic_get_property(crtc, state, property, val);
 	else
@@ -673,7 +757,7 @@ static int drm_atomic_plane_check(struct drm_plane *plane,
 {
 	struct drm_mode_config *config;
 	unsigned int fb_width, fb_height;
-	unsigned int i;
+	int ret;
 
 	/* either *both* CRTC and FB must be set, or neither */
 	if (WARN_ON(state->crtc && !state->fb)) {
@@ -695,13 +779,11 @@ static int drm_atomic_plane_check(struct drm_plane *plane,
 	}
 
 	/* Check whether this plane supports the fb pixel format. */
-	for (i = 0; i < plane->format_count; i++)
-		if (state->fb->pixel_format == plane->format_types[i])
-			break;
-	if (i == plane->format_count) {
+	ret = drm_plane_check_pixel_format(plane, state->fb->pixel_format);
+	if (ret) {
 		DRM_DEBUG_ATOMIC("Invalid pixel format %s\n",
 				 drm_get_format_name(state->fb->pixel_format));
-		return -EINVAL;
+		return ret;
 	}
 
 	/* Check whether the source width and height are within limits */
@@ -1171,12 +1253,7 @@ void drm_atomic_legacy_backoff(struct drm_atomic_state *state)
 retry:
 	drm_modeset_backoff(state->acquire_ctx);
 
-	ret = drm_modeset_lock(&state->dev->mode_config.connection_mutex,
-			       state->acquire_ctx);
-	if (ret)
-		goto retry;
-	ret = drm_modeset_lock_all_crtcs(state->dev,
-					 state->acquire_ctx);
+	ret = drm_modeset_lock_all_ctx(state->dev, state->acquire_ctx);
 	if (ret)
 		goto retry;
 }

@@ -69,6 +69,10 @@ int check_signature(const volatile void __iomem *io_addr,
 			const unsigned char *signature, int length);
 void devm_ioremap_release(struct device *dev, void *res);
 
+void *devm_memremap(struct device *dev, resource_size_t offset,
+		size_t size, unsigned long flags);
+void devm_memunmap(struct device *dev, void *addr);
+
 /*
  * Some systems do not have legacy ISA devices.
  * /dev/port is not a valid interface on these systems.
@@ -102,5 +106,15 @@ static inline void arch_phys_wc_del(int handle)
 
 #define arch_phys_wc_add arch_phys_wc_add
 #endif
+
+enum {
+	/* See memremap() kernel-doc for usage description... */
+	MEMREMAP_WB = 1 << 0,
+	MEMREMAP_WT = 1 << 1,
+	MEMREMAP_WC = 1 << 2,
+};
+
+void *memremap(resource_size_t offset, size_t size, unsigned long flags);
+void memunmap(void *addr);
 
 #endif /* _LINUX_IO_H */

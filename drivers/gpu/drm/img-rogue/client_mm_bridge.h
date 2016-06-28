@@ -44,8 +44,13 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #ifndef CLIENT_MM_BRIDGE_H
 #define CLIENT_MM_BRIDGE_H
 
+#include "img_defs.h"
+#include "pvrsrv_error.h"
+
+#if defined(PVR_INDIRECT_BRIDGE_CLIENTS)
 #include "pvr_bridge_client.h"
 #include "pvr_bridge.h"
+#endif
 
 #include "common_mm_bridge.h"
 
@@ -215,6 +220,12 @@ IMG_INTERNAL PVRSRV_ERROR IMG_CALLCONV BridgeHeapCfgHeapDetails(IMG_HANDLE hBrid
 								IMG_DEVMEM_SIZE_T *puiHeapLength,
 								IMG_UINT32 *pui32Log2DataPageSizeOut,
 								IMG_UINT32 *pui32Log2ImportAlignmentOut);
+
+IMG_INTERNAL PVRSRV_ERROR IMG_CALLCONV BridgeDevmemIntCtxCreateCLS(IMG_HANDLE hBridge,
+								   IMG_BOOL bbKernelMemoryCtx,
+								   IMG_HANDLE *phDevMemServerContext,
+								   IMG_HANDLE *phPrivData,
+								   IMG_UINT32 *pui32CPUCacheLineSize);
 
 
 #endif /* CLIENT_MM_BRIDGE_H */

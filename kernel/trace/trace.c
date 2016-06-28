@@ -949,19 +949,20 @@ out:
 	return ret;
 }
 
+/* TODO add a seq_buf_to_buffer() */
 static ssize_t trace_seq_to_buffer(struct trace_seq *s, void *buf, size_t cnt)
 {
 	int len;
 
-	if (s->len <= s->readpos)
+	if (trace_seq_used(s) <= s->seq.readpos)
 		return -EBUSY;
 
-	len = s->len - s->readpos;
+	len = trace_seq_used(s) - s->seq.readpos;
 	if (cnt > len)
 		cnt = len;
-	memcpy(buf, s->buffer + s->readpos, cnt);
+	memcpy(buf, s->buffer + s->seq.readpos, cnt);
 
-	s->readpos += cnt;
+	s->seq.readpos += cnt;
 	return cnt;
 }
 
@@ -2699,24 +2700,21 @@ static enum print_line_t print_trace_fmt(struct trace_iterator *iter)
 	event = ftrace_find_event(entry->type);
 
 	if (trace_flags & TRACE_ITER_CONTEXT_INFO) {
-		if (iter->iter_flags & TRACE_FILE_LAT_FMT) {
-			if (!trace_print_lat_context(iter))
-				goto partial;
-		} else {
-			if (!trace_print_context(iter))
-				goto partial;
-		}
+		if (iter->iter_flags & TRACE_FILE_LAT_FMT)
+			trace_print_lat_context(iter);
+		else
+			trace_print_context(iter);
 	}
+
+	if (trace_seq_has_overflowed(s))
+		return TRACE_TYPE_PARTIAL_LINE;
 
 	if (event)
 		return event->funcs->trace(iter, sym_flags, event);
 
-	if (!trace_seq_printf(s, "Unknown type %d\n", entry->type))
-		goto partial;
+	trace_seq_printf(s, "Unknown type %d\n", entry->type);
 
-	return TRACE_TYPE_HANDLED;
-partial:
-	return TRACE_TYPE_PARTIAL_LINE;
+	return trace_handle_return(s);
 }
 
 static enum print_line_t print_raw_fmt(struct trace_iterator *iter)
@@ -2727,22 +2725,20 @@ static enum print_line_t print_raw_fmt(struct trace_iterator *iter)
 
 	entry = iter->ent;
 
-	if (trace_flags & TRACE_ITER_CONTEXT_INFO) {
-		if (!trace_seq_printf(s, "%d %d %llu ",
-				      entry->pid, iter->cpu, iter->ts))
-			goto partial;
-	}
+	if (trace_flags & TRACE_ITER_CONTEXT_INFO)
+		trace_seq_printf(s, "%d %d %llu ",
+				 entry->pid, iter->cpu, iter->ts);
+
+	if (trace_seq_has_overflowed(s))
+		return TRACE_TYPE_PARTIAL_LINE;
 
 	event = ftrace_find_event(entry->type);
 	if (event)
 		return event->funcs->raw(iter, 0, event);
 
-	if (!trace_seq_printf(s, "%d ?\n", entry->type))
-		goto partial;
+	trace_seq_printf(s, "%d ?\n", entry->type);
 
-	return TRACE_TYPE_HANDLED;
-partial:
-	return TRACE_TYPE_PARTIAL_LINE;
+	return trace_handle_return(s);
 }
 
 static enum print_line_t print_hex_fmt(struct trace_iterator *iter)
@@ -2755,9 +2751,11 @@ static enum print_line_t print_hex_fmt(struct trace_iterator *iter)
 	entry = iter->ent;
 
 	if (trace_flags & TRACE_ITER_CONTEXT_INFO) {
-		SEQ_PUT_HEX_FIELD_RET(s, entry->pid);
-		SEQ_PUT_HEX_FIELD_RET(s, iter->cpu);
-		SEQ_PUT_HEX_FIELD_RET(s, iter->ts);
+		SEQ_PUT_HEX_FIELD(s, entry->pid);
+		SEQ_PUT_HEX_FIELD(s, iter->cpu);
+		SEQ_PUT_HEX_FIELD(s, iter->ts);
+		if (trace_seq_has_overflowed(s))
+			return TRACE_TYPE_PARTIAL_LINE;
 	}
 
 	event = ftrace_find_event(entry->type);
@@ -2767,9 +2765,9 @@ static enum print_line_t print_hex_fmt(struct trace_iterator *iter)
 			return ret;
 	}
 
-	SEQ_PUT_FIELD_RET(s, newline);
+	SEQ_PUT_FIELD(s, newline);
 
-	return TRACE_TYPE_HANDLED;
+	return trace_handle_return(s);
 }
 
 static enum print_line_t print_bin_fmt(struct trace_iterator *iter)
@@ -2781,9 +2779,11 @@ static enum print_line_t print_bin_fmt(struct trace_iterator *iter)
 	entry = iter->ent;
 
 	if (trace_flags & TRACE_ITER_CONTEXT_INFO) {
-		SEQ_PUT_FIELD_RET(s, entry->pid);
-		SEQ_PUT_FIELD_RET(s, iter->cpu);
-		SEQ_PUT_FIELD_RET(s, iter->ts);
+		SEQ_PUT_FIELD(s, entry->pid);
+		SEQ_PUT_FIELD(s, iter->cpu);
+		SEQ_PUT_FIELD(s, iter->ts);
+		if (trace_seq_has_overflowed(s))
+			return TRACE_TYPE_PARTIAL_LINE;
 	}
 
 	event = ftrace_find_event(entry->type);
@@ -2829,10 +2829,12 @@ enum print_line_t print_trace_line(struct trace_iterator *iter)
 {
 	enum print_line_t ret;
 
-	if (iter->lost_events &&
-	    !trace_seq_printf(&iter->seq, "CPU:%d [LOST %lu EVENTS]\n",
-				 iter->cpu, iter->lost_events))
-		return TRACE_TYPE_PARTIAL_LINE;
+	if (iter->lost_events) {
+		trace_seq_printf(&iter->seq, "CPU:%d [LOST %lu EVENTS]\n",
+				 iter->cpu, iter->lost_events);
+		if (trace_seq_has_overflowed(&iter->seq))
+			return TRACE_TYPE_PARTIAL_LINE;
+	}
 
 	if (iter->trace && iter->trace->print_line) {
 		ret = iter->trace->print_line(iter);
@@ -2916,44 +2918,44 @@ static void test_ftrace_alive(struct seq_file *m)
 {
 	if (!ftrace_is_dead())
 		return;
-	seq_printf(m, "# WARNING: FUNCTION TRACING IS CORRUPTED\n");
-	seq_printf(m, "#          MAY BE MISSING FUNCTION EVENTS\n");
+	seq_puts(m, "# WARNING: FUNCTION TRACING IS CORRUPTED\n");
+	seq_puts(m, "#          MAY BE MISSING FUNCTION EVENTS\n");
 }
 
 #ifdef CONFIG_TRACER_MAX_TRACE
 static void show_snapshot_main_help(struct seq_file *m)
 {
-	seq_printf(m, "# echo 0 > snapshot : Clears and frees snapshot buffer\n");
-	seq_printf(m, "# echo 1 > snapshot : Allocates snapshot buffer, if not already allocated.\n");
-	seq_printf(m, "#                      Takes a snapshot of the main buffer.\n");
-	seq_printf(m, "# echo 2 > snapshot : Clears snapshot buffer (but does not allocate or free)\n");
-	seq_printf(m, "#                      (Doesn't have to be '2' works with any number that\n");
-	seq_printf(m, "#                       is not a '0' or '1')\n");
+	seq_puts(m, "# echo 0 > snapshot : Clears and frees snapshot buffer\n");
+	seq_puts(m, "# echo 1 > snapshot : Allocates snapshot buffer, if not already allocated.\n");
+	seq_puts(m, "#                      Takes a snapshot of the main buffer.\n");
+	seq_puts(m, "# echo 2 > snapshot : Clears snapshot buffer (but does not allocate or free)\n");
+	seq_puts(m, "#                      (Doesn't have to be '2' works with any number that\n");
+	seq_puts(m, "#                       is not a '0' or '1')\n");
 }
 
 static void show_snapshot_percpu_help(struct seq_file *m)
 {
-	seq_printf(m, "# echo 0 > snapshot : Invalid for per_cpu snapshot file.\n");
+	seq_puts(m, "# echo 0 > snapshot : Invalid for per_cpu snapshot file.\n");
 #ifdef CONFIG_RING_BUFFER_ALLOW_SWAP
-	seq_printf(m, "# echo 1 > snapshot : Allocates snapshot buffer, if not already allocated.\n");
-	seq_printf(m, "#                      Takes a snapshot of the main buffer for this cpu.\n");
+	seq_puts(m, "# echo 1 > snapshot : Allocates snapshot buffer, if not already allocated.\n");
+	seq_puts(m, "#                      Takes a snapshot of the main buffer for this cpu.\n");
 #else
-	seq_printf(m, "# echo 1 > snapshot : Not supported with this kernel.\n");
-	seq_printf(m, "#                     Must use main snapshot file to allocate.\n");
+	seq_puts(m, "# echo 1 > snapshot : Not supported with this kernel.\n");
+	seq_puts(m, "#                     Must use main snapshot file to allocate.\n");
 #endif
-	seq_printf(m, "# echo 2 > snapshot : Clears this cpu's snapshot buffer (but does not allocate)\n");
-	seq_printf(m, "#                      (Doesn't have to be '2' works with any number that\n");
-	seq_printf(m, "#                       is not a '0' or '1')\n");
+	seq_puts(m, "# echo 2 > snapshot : Clears this cpu's snapshot buffer (but does not allocate)\n");
+	seq_puts(m, "#                      (Doesn't have to be '2' works with any number that\n");
+	seq_puts(m, "#                       is not a '0' or '1')\n");
 }
 
 static void print_snapshot_help(struct seq_file *m, struct trace_iterator *iter)
 {
 	if (iter->tr->allocated_snapshot)
-		seq_printf(m, "#\n# * Snapshot is allocated *\n#\n");
+		seq_puts(m, "#\n# * Snapshot is allocated *\n#\n");
 	else
-		seq_printf(m, "#\n# * Snapshot is freed *\n#\n");
+		seq_puts(m, "#\n# * Snapshot is freed *\n#\n");
 
-	seq_printf(m, "# Snapshot commands:\n");
+	seq_puts(m, "# Snapshot commands:\n");
 	if (iter->cpu_file == RING_BUFFER_ALL_CPUS)
 		show_snapshot_main_help(m);
 	else
@@ -3307,7 +3309,7 @@ static int t_show(struct seq_file *m, void *v)
 	if (!t)
 		return 0;
 
-	seq_printf(m, "%s", t->name);
+	seq_puts(m, t->name);
 	if (t->next)
 		seq_putc(m, ' ');
 	else
@@ -4193,9 +4195,24 @@ static void tracing_set_nop(struct trace_array *tr)
 	tr->current_trace = &nop_trace;
 }
 
-static int tracing_set_tracer(struct trace_array *tr, const char *buf)
+static void update_tracer_options(struct trace_array *tr, struct tracer *t)
 {
 	static struct trace_option_dentry *topts;
+
+	/* Only enable if the directory has been created already. */
+	if (!tr->dir)
+		return;
+
+	/* Currently, only the top instance has options */
+	if (!(tr->flags & TRACE_ARRAY_FL_GLOBAL))
+		return;
+
+	destroy_trace_option_files(topts);
+	topts = create_trace_option_files(tr, t);
+}
+
+static int tracing_set_tracer(struct trace_array *tr, const char *buf)
+{
 	struct tracer *t;
 #ifdef CONFIG_TRACER_MAX_TRACE
 	bool had_max_tr;
@@ -4254,11 +4271,7 @@ static int tracing_set_tracer(struct trace_array *tr, const char *buf)
 		free_snapshot(tr);
 	}
 #endif
-	/* Currently, only the top instance has options */
-	if (tr->flags & TRACE_ARRAY_FL_GLOBAL) {
-		destroy_trace_option_files(topts);
-		topts = create_trace_option_files(tr, t);
-	}
+	update_tracer_options(tr, t);
 
 #ifdef CONFIG_TRACER_MAX_TRACE
 	if (t->use_max_tr && !had_max_tr) {
@@ -4413,6 +4426,8 @@ static int tracing_open_pipe(struct inode *inode, struct file *filp)
 		__trace_array_put(tr);
 		goto out;
 	}
+
+	trace_seq_init(&iter->seq);
 
 	/*
 	 * We make a copy of the current tracer to avoid concurrent
@@ -4607,18 +4622,18 @@ waitagain:
 	trace_access_lock(iter->cpu_file);
 	while (trace_find_next_entry_inc(iter) != NULL) {
 		enum print_line_t ret;
-		int len = iter->seq.len;
+		int save_len = iter->seq.seq.len;
 
 		ret = print_trace_line(iter);
 		if (ret == TRACE_TYPE_PARTIAL_LINE) {
 			/* don't print partial lines */
-			iter->seq.len = len;
+			iter->seq.seq.len = save_len;
 			break;
 		}
 		if (ret != TRACE_TYPE_NO_CONSUME)
 			trace_consume(iter);
 
-		if (iter->seq.len >= cnt)
+		if (trace_seq_used(&iter->seq) >= cnt)
 			break;
 
 		/*
@@ -4634,7 +4649,7 @@ waitagain:
 
 	/* Now copy what we have to the user */
 	sret = trace_seq_to_user(&iter->seq, ubuf, cnt);
-	if (iter->seq.readpos >= iter->seq.len)
+	if (iter->seq.seq.readpos >= trace_seq_used(&iter->seq))
 		trace_seq_init(&iter->seq);
 
 	/*
@@ -4668,20 +4683,33 @@ static size_t
 tracing_fill_pipe_page(size_t rem, struct trace_iterator *iter)
 {
 	size_t count;
+	int save_len;
 	int ret;
 
 	/* Seq buffer is page-sized, exactly what we need. */
 	for (;;) {
-		count = iter->seq.len;
+		save_len = iter->seq.seq.len;
 		ret = print_trace_line(iter);
-		count = iter->seq.len - count;
-		if (rem < count) {
-			rem = 0;
-			iter->seq.len -= count;
+
+		if (trace_seq_has_overflowed(&iter->seq)) {
+			iter->seq.seq.len = save_len;
 			break;
 		}
+
+		/*
+		 * This should not be hit, because it should only
+		 * be set if the iter->seq overflowed. But check it
+		 * anyway to be safe.
+		 */
 		if (ret == TRACE_TYPE_PARTIAL_LINE) {
-			iter->seq.len -= count;
+			iter->seq.seq.len = save_len;
+			break;
+		}
+
+		count = trace_seq_used(&iter->seq) - save_len;
+		if (rem < count) {
+			rem = 0;
+			iter->seq.seq.len = save_len;
 			break;
 		}
 
@@ -4762,13 +4790,13 @@ static ssize_t tracing_splice_read_pipe(struct file *filp,
 		/* Copy the data into the page, so we can start over. */
 		ret = trace_seq_to_buffer(&iter->seq,
 					  page_address(spd.pages[i]),
-					  iter->seq.len);
+					  trace_seq_used(&iter->seq));
 		if (ret < 0) {
 			__free_page(spd.pages[i]);
 			break;
 		}
 		spd.partial[i].offset = 0;
-		spd.partial[i].len = iter->seq.len;
+		spd.partial[i].len = trace_seq_used(&iter->seq);
 
 		trace_seq_init(&iter->seq);
 	}
@@ -5768,7 +5796,8 @@ tracing_stats_read(struct file *filp, char __user *ubuf,
 	cnt = ring_buffer_read_events_cpu(trace_buf->buffer, cpu);
 	trace_seq_printf(s, "read events: %ld\n", cnt);
 
-	count = simple_read_from_buffer(ubuf, count, ppos, s->buffer, s->len);
+	count = simple_read_from_buffer(ubuf, count, ppos,
+					s->buffer, trace_seq_used(s));
 
 	kfree(s);
 
@@ -5849,10 +5878,10 @@ ftrace_snapshot_print(struct seq_file *m, unsigned long ip,
 
 	seq_printf(m, "%ps:", (void *)ip);
 
-	seq_printf(m, "snapshot");
+	seq_puts(m, "snapshot");
 
 	if (count == -1)
-		seq_printf(m, ":unlimited\n");
+		seq_puts(m, ":unlimited\n");
 	else
 		seq_printf(m, ":count=%ld\n", count);
 
@@ -6687,6 +6716,10 @@ static __init int tracer_init_debugfs(void)
 
 	create_trace_options_dir(&global_trace);
 
+	/* If the tracer was started via cmdline, create options for it here */
+	if (global_trace.current_trace != &nop_trace)
+		update_tracer_options(&global_trace, global_trace.current_trace);
+
 	return 0;
 }
 
@@ -6741,11 +6774,19 @@ void
 trace_printk_seq(struct trace_seq *s)
 {
 	/* Probably should print a warning here. */
-	if (s->len >= TRACE_MAX_PRINT)
-		s->len = TRACE_MAX_PRINT;
+	if (s->seq.len >= TRACE_MAX_PRINT)
+		s->seq.len = TRACE_MAX_PRINT;
+
+	/*
+	 * More paranoid code. Although the buffer size is set to
+	 * PAGE_SIZE, and TRACE_MAX_PRINT is 1000, this is just
+	 * an extra layer of protection.
+	 */
+	if (WARN_ON_ONCE(s->seq.len >= s->seq.size))
+		s->seq.len = s->seq.size - 1;
 
 	/* should be zero ended, but we are paranoid. */
-	s->buffer[s->len] = 0;
+	s->buffer[s->seq.len] = 0;
 
 	printk(KERN_TRACE "%s", s->buffer);
 

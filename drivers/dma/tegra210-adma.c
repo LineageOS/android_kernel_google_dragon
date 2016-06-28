@@ -1,7 +1,7 @@
 /*
  * ADMA driver for Nvidia's Tegra210 ADMA controller.
  *
- * Copyright (c) 2014-2015, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2014-2016, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -481,6 +481,7 @@ static void tegra_adma_abort_all(struct tegra_adma_chan *tdc)
 /* Returns bytes transferred with period size granularity */
 static inline uint64_t tegra_adma_get_position(struct tegra_adma_chan *tdc)
 {
+	unsigned long cur_tc = 0;
 	uint64_t tx_done_max = (ADMA_CH_TRANSFER_DONE_COUNT_MASK >>
 		ADMA_CH_TRANSFER_DONE_COUNT_SHIFT) + 1;
 	uint64_t tx_done = channel_read(tdc, ADMA_CH_TRANSFER_STATUS) &
@@ -494,7 +495,13 @@ static inline uint64_t tegra_adma_get_position(struct tegra_adma_chan *tdc)
 	else
 		tdc->total_tx_done += (tx_done - tdc->channel_reg.tx_done);
 	tdc->channel_reg.tx_done = tx_done;
-	return tdc->total_tx_done * tdc->channel_reg.tc;
+
+	/* read TC_STATUS register to get current transfer status */
+	cur_tc = channel_read(tdc, ADMA_CH_TC_STATUS);
+	/* get transferred data count */
+	cur_tc = tdc->channel_reg.tc - cur_tc;
+
+	return (tdc->total_tx_done * tdc->channel_reg.tc) + cur_tc;
 }
 
 static bool handle_continuous_head_request(struct tegra_adma_chan *tdc,
@@ -734,17 +741,17 @@ skip_dma_stop:
 	/*
 	 * The tasklet may be active and so set the current callback
 	 * count to zero to terminate the tasklet.
+	 * 1. If tegra_adma_terminate_all is called by the tasklet callback
+	 *    itself due to xrun, callback_count=0 ensures the callback is not
+	 *    called again after the current callback returns.
+	 * 2. If tegra_adma_terminate_all is called by the client thread that
+	 *    wants to stop audio, no new callbacks are going to be scheduled
+	 *    after this point. However, the callback can still be running on
+	 *    another CPU at this point if it was started before tdc->lock is
+	 *    grabbed. We sync with the callback in device_free_chan_resources
+	 *    since the current context is atomic.
 	 */
 	tdc->callback_count = 0;
-
-	/* Make sure the tasklet has stopped running before we return. */
-	if (!in_interrupt()) {
-		tdc->busy = true;
-		spin_unlock_irqrestore(&tdc->lock, flags);
-		tasklet_kill(&tdc->tasklet);
-		spin_lock_irqsave(&tdc->lock, flags);
-		tdc->busy = false;
-	}
 
 	spin_unlock_irqrestore(&tdc->lock, flags);
 }
@@ -770,9 +777,9 @@ static enum dma_status tegra_adma_tx_status(struct dma_chan *dc,
 	/* Check on wait_ack desc status */
 	list_for_each_entry(dma_desc, &tdc->free_dma_desc, node) {
 		if (dma_desc->txd.cookie == cookie) {
-			residual =  dma_desc->bytes_requested -
-					(dma_desc->bytes_transferred %
-						dma_desc->bytes_requested);
+			div_u64_rem(tegra_adma_get_position(tdc),
+				    dma_desc->bytes_requested, &residual);
+			residual = dma_desc->bytes_requested - residual;
 			dma_set_residue(txstate, residual);
 			ret = dma_desc->dma_status;
 			spin_unlock_irqrestore(&tdc->lock, flags);
@@ -784,9 +791,9 @@ static enum dma_status tegra_adma_tx_status(struct dma_chan *dc,
 	list_for_each_entry(sg_req, &tdc->pending_sg_req, node) {
 		dma_desc = sg_req->dma_desc;
 		if (dma_desc->txd.cookie == cookie) {
-			residual =  dma_desc->bytes_requested -
-					(dma_desc->bytes_transferred %
-						dma_desc->bytes_requested);
+			div_u64_rem(tegra_adma_get_position(tdc),
+				    dma_desc->bytes_requested, &residual);
+			residual = dma_desc->bytes_requested - residual;
 			dma_set_residue(txstate, residual);
 			ret = dma_desc->dma_status;
 			spin_unlock_irqrestore(&tdc->lock, flags);
@@ -1141,6 +1148,18 @@ static void tegra_adma_free_chan_resources(struct dma_chan *dc)
 
 	if (tdc->busy)
 		tegra_adma_terminate_all(dc);
+
+	/* Ensure the callback in the tasklet finishes before freeing resources.
+	 * We cannot sync in tegra_adma_terminate_all, because it is called
+	 * from atomic context SNDRV_PCM_TRIGGER_STOP->DMA_TERMINATE_ALL.
+	 * The current context is not atomic (from pcm_close op), so it's OK
+	 * to sleep and sync here.
+	 * Without this sync, the callback (e.g. dmaengine_pcm_dma_complete)
+	 * may still be running after snd_pcm_release which frees
+	 * snd_pcm_substream, causing use-after-free crash.
+	 */
+	tasklet_kill(&tdc->tasklet);
+
 	pm_runtime_put(tdc->tdma->dev);
 	spin_lock_irqsave(&tdc->lock, flags);
 	list_splice_init(&tdc->pending_sg_req, &sg_req_list);

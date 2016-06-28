@@ -64,7 +64,6 @@ static const struct snd_soc_dapm_widget skylake_widgets[] = {
 	SND_SOC_DAPM_MIC("Mic Jack", NULL),
 	SND_SOC_DAPM_MIC("DMIC2", NULL),
 	SND_SOC_DAPM_MIC("SoC DMIC", NULL),
-	SND_SOC_DAPM_SINK("WoV Sink"),
 	SND_SOC_DAPM_SPK("HDMI1", NULL),
 	SND_SOC_DAPM_SPK("HDMI2", NULL),
 	SND_SOC_DAPM_SPK("HDMI3", NULL),
@@ -84,8 +83,6 @@ static const struct snd_soc_dapm_route skylake_rt286_map[] = {
 	/* digital mics */
 	{"DMIC1 Pin", NULL, "DMIC2"},
 	{"DMic", NULL, "SoC DMIC"},
-
-	{"WoV Sink", NULL, "hwd_in sink"},
 
 	{"HDMI1", NULL, "hif5 Output"},
 	{"HDMI2", NULL, "hif6 Output"},
@@ -139,31 +136,15 @@ static int skylake_rt286_codec_init(struct snd_soc_pcm_runtime *rtd)
 	rt286_mic_detect(codec, &skylake_headset);
 
 	snd_soc_dapm_ignore_suspend(&rtd->card->dapm, "SoC DMIC");
-	snd_soc_dapm_ignore_suspend(&rtd->card->dapm, "WoV Sink");
 
 	return 0;
 }
 
-static int skylake_hdmi1_init(struct snd_soc_pcm_runtime *rtd)
+static int skylake_hdmi_init(struct snd_soc_pcm_runtime *rtd)
 {
 	struct snd_soc_dai *dai = rtd->codec_dai;
 
-	return hdac_hdmi_jack_init(dai, SKL_DPCM_AUDIO_HDMI1_PB);
-}
-
-static int skylake_hdmi2_init(struct snd_soc_pcm_runtime *rtd)
-{
-	struct snd_soc_dai *dai = rtd->codec_dai;
-
-	return hdac_hdmi_jack_init(dai, SKL_DPCM_AUDIO_HDMI2_PB);
-}
-
-
-static int skylake_hdmi3_init(struct snd_soc_pcm_runtime *rtd)
-{
-	struct snd_soc_dai *dai = rtd->codec_dai;
-
-	return hdac_hdmi_jack_init(dai, SKL_DPCM_AUDIO_HDMI3_PB);
+	return hdac_hdmi_jack_init(dai, SKL_DPCM_AUDIO_HDMI1_PB + dai->id);
 }
 
 static unsigned int rates[] = {
@@ -257,7 +238,10 @@ static int skylake_dmic_fixup(struct snd_soc_pcm_runtime *rtd,
 {
 	struct snd_interval *channels = hw_param_interval(params,
 						SNDRV_PCM_HW_PARAM_CHANNELS);
-	channels->min = channels->max = 4;
+	if (params_channels(params) == 2)
+		channels->min = channels->max = 2;
+	else
+		channels->min = channels->max = 4;
 
 	return 0;
 }
@@ -291,8 +275,7 @@ static struct snd_soc_ops skylake_dmic_ops = {
 /* skylake digital audio interface glue - connects codec <--> CPU */
 static struct snd_soc_dai_link skylake_rt286_dais[] = {
 	/* Front End DAI links */
-	[SKL_DPCM_AUDIO_PB]
-	{
+	[SKL_DPCM_AUDIO_PB] = {
 		.name = "Skl Audio Port",
 		.stream_name = "Audio",
 		.cpu_dai_name = "System Pin",
@@ -309,8 +292,7 @@ static struct snd_soc_dai_link skylake_rt286_dais[] = {
 		.dpcm_playback = 1,
 		.ops = &skylake_rt286_fe_ops,
 	},
-	[SKL_DPCM_AUDIO_CP]
-	{
+	[SKL_DPCM_AUDIO_CP] = {
 		.name = "Skl Audio Capture Port",
 		.stream_name = "Audio Record",
 		.cpu_dai_name = "System Pin",
@@ -326,8 +308,7 @@ static struct snd_soc_dai_link skylake_rt286_dais[] = {
 		.dpcm_capture = 1,
 		.ops = &skylake_rt286_fe_ops,
 	},
-	[SKL_DPCM_AUDIO_REF_CP]
-	{
+	[SKL_DPCM_AUDIO_REF_CP] = {
 		.name = "Skl Audio Reference cap",
 		.stream_name = "refcap",
 		.cpu_dai_name = "Reference Pin",
@@ -340,8 +321,7 @@ static struct snd_soc_dai_link skylake_rt286_dais[] = {
 		.nonatomic = 1,
 		.dynamic = 1,
 	},
-	[SKL_DPCM_AUDIO_DMIC_CP]
-	{
+	[SKL_DPCM_AUDIO_DMIC_CP] = {
 		.name = "Skl Audio DMIC cap",
 		.stream_name = "dmiccap",
 		.cpu_dai_name = "DMIC Pin",
@@ -354,8 +334,7 @@ static struct snd_soc_dai_link skylake_rt286_dais[] = {
 		.dynamic = 1,
 		.ops = &skylake_dmic_ops,
 	},
-	[SKL_DPCM_AUDIO_HDMI1_PB]
-	{
+	[SKL_DPCM_AUDIO_HDMI1_PB] = {
 		.name = "Skl HDMI Port1",
 		.stream_name = "Hdmi1",
 		.cpu_dai_name = "HDMI1 Pin",
@@ -367,8 +346,7 @@ static struct snd_soc_dai_link skylake_rt286_dais[] = {
 		.nonatomic = 1,
 		.dynamic = 1,
 	},
-	[SKL_DPCM_AUDIO_HDMI2_PB]
-	{
+	[SKL_DPCM_AUDIO_HDMI2_PB] = {
 		.name = "Skl HDMI Port2",
 		.stream_name = "Hdmi2",
 		.cpu_dai_name = "HDMI2 Pin",
@@ -380,8 +358,7 @@ static struct snd_soc_dai_link skylake_rt286_dais[] = {
 		.nonatomic = 1,
 		.dynamic = 1,
 	},
-	[SKL_DPCM_AUDIO_HDMI3_PB]
-	{
+	[SKL_DPCM_AUDIO_HDMI3_PB] = {
 		.name = "Skl HDMI Port3",
 		.stream_name = "Hdmi3",
 		.cpu_dai_name = "HDMI3 Pin",
@@ -433,7 +410,7 @@ static struct snd_soc_dai_link skylake_rt286_dais[] = {
 		.codec_name = "ehdaudio0D2",
 		.codec_dai_name = "intel-hdmi-hifi1",
 		.platform_name = "0000:00:1f.3",
-		.init = skylake_hdmi1_init,
+		.init = skylake_hdmi_init,
 		.dpcm_playback = 1,
 		.no_pcm = 1,
 	},
@@ -444,7 +421,7 @@ static struct snd_soc_dai_link skylake_rt286_dais[] = {
 		.codec_name = "ehdaudio0D2",
 		.codec_dai_name = "intel-hdmi-hifi2",
 		.platform_name = "0000:00:1f.3",
-		.init = skylake_hdmi2_init,
+		.init = skylake_hdmi_init,
 		.dpcm_playback = 1,
 		.no_pcm = 1,
 	},
@@ -455,7 +432,7 @@ static struct snd_soc_dai_link skylake_rt286_dais[] = {
 		.codec_name = "ehdaudio0D2",
 		.codec_dai_name = "intel-hdmi-hifi3",
 		.platform_name = "0000:00:1f.3",
-		.init = skylake_hdmi3_init,
+		.init = skylake_hdmi_init,
 		.dpcm_playback = 1,
 		.no_pcm = 1,
 	},

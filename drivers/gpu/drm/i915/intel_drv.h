@@ -453,6 +453,9 @@ struct intel_crtc_state {
 
 	/* w/a for waiting 2 vblanks during crtc enable */
 	enum pipe hsw_workaround_pipe;
+
+	/* Gamma mode programmed on the pipe */
+	uint32_t gamma_mode;
 };
 
 struct vlv_wm_state {
@@ -701,7 +704,10 @@ struct intel_dp {
 	uint32_t output_reg;
 	uint32_t aux_ch_ctl_reg;
 	uint32_t DP;
+	uint8_t lane_count;
+	uint8_t sink_count;
 	bool has_audio;
+	bool detect_done;
 	enum hdmi_force_audio force_audio;
 	bool limited_color_range;
 	bool color_range_auto;
@@ -737,6 +743,8 @@ struct intel_dp {
 
 	bool use_tps3;
 	bool is_ps8617;
+	bool has_hdmi_sink;
+	bool has_dvi_sink;
 	bool can_mst; /* this port supports mst */
 	bool is_mst;
 	int active_mst_links;
@@ -896,9 +904,18 @@ hdmi_to_dig_port(struct intel_hdmi *intel_hdmi)
 	return container_of(intel_hdmi, struct intel_digital_port, hdmi);
 }
 
+static inline bool pipe_has_cursor_plane(struct drm_i915_private *dev_priv, int pipe)
+{
+	if (IS_CHERRYVIEW(dev_priv) && pipe == PIPE_C)
+		return false;
+
+	return true;
+}
+
 /*
  * Returns the number of planes for this pipe, ie the number of sprites + 1
- * (primary plane). This doesn't count the cursor plane then.
+ * (primary plane). This doesn't count the cursor plane except on CHV pipe C,
+ * which has a universal plane masked as cursor plane.
  */
 static inline unsigned int intel_num_planes(struct intel_crtc *crtc)
 {
@@ -1107,6 +1124,9 @@ void assert_pll(struct drm_i915_private *dev_priv,
 		enum pipe pipe, bool state);
 #define assert_pll_enabled(d, p) assert_pll(d, p, true)
 #define assert_pll_disabled(d, p) assert_pll(d, p, false)
+void assert_dsi_pll(struct drm_i915_private *dev_priv, bool state);
+#define assert_dsi_pll_enabled(d) assert_dsi_pll(d, true)
+#define assert_dsi_pll_disabled(d) assert_dsi_pll(d, false)
 void assert_fdi_rx_pll(struct drm_i915_private *dev_priv,
 		       enum pipe pipe, bool state);
 #define assert_fdi_rx_pll_enabled(d, p) assert_fdi_rx_pll(d, p, true)
@@ -1353,9 +1373,78 @@ bool __intel_display_power_is_enabled(struct drm_i915_private *dev_priv,
 				      enum intel_display_power_domain domain);
 void intel_display_power_get(struct drm_i915_private *dev_priv,
 			     enum intel_display_power_domain domain);
+bool intel_display_power_get_if_enabled(struct drm_i915_private *dev_priv,
+					enum intel_display_power_domain domain);
 void intel_display_power_put(struct drm_i915_private *dev_priv,
 			     enum intel_display_power_domain domain);
+
+static inline void
+assert_rpm_device_not_suspended(struct drm_i915_private *dev_priv)
+{
+	WARN_ONCE(dev_priv->pm.suspended,
+		  "Device suspended during HW access\n");
+}
+
+static inline void
+assert_rpm_wakelock_held(struct drm_i915_private *dev_priv)
+{
+	assert_rpm_device_not_suspended(dev_priv);
+	/* FIXME: Needs to be converted back to WARN_ONCE, but currently causes
+	 * too much noise. */
+	if (!atomic_read(&dev_priv->pm.wakeref_count))
+		DRM_DEBUG_DRIVER("RPM wakelock ref not held during HW access");
+}
+
+/**
+ * disable_rpm_wakeref_asserts - disable the RPM assert checks
+ * @dev_priv: i915 device instance
+ *
+ * This function disable asserts that check if we hold an RPM wakelock
+ * reference, while keeping the device-not-suspended checks still enabled.
+ * It's meant to be used only in special circumstances where our rule about
+ * the wakelock refcount wrt. the device power state doesn't hold. According
+ * to this rule at any point where we access the HW or want to keep the HW in
+ * an active state we must hold an RPM wakelock reference acquired via one of
+ * the intel_runtime_pm_get() helpers. Currently there are a few special spots
+ * where this rule doesn't hold: the IRQ and suspend/resume handlers, the
+ * forcewake release timer, and the GPU RPS and hangcheck works. All other
+ * users should avoid using this function.
+ *
+ * Any calls to this function must have a symmetric call to
+ * enable_rpm_wakeref_asserts().
+ */
+static inline void
+disable_rpm_wakeref_asserts(struct drm_i915_private *dev_priv)
+{
+	atomic_inc(&dev_priv->pm.wakeref_count);
+}
+
+/**
+ * enable_rpm_wakeref_asserts - re-enable the RPM assert checks
+ * @dev_priv: i915 device instance
+ *
+ * This function re-enables the RPM assert checks after disabling them with
+ * disable_rpm_wakeref_asserts. It's meant to be used only in special
+ * circumstances otherwise its use should be avoided.
+ *
+ * Any calls to this function must have a symmetric call to
+ * disable_rpm_wakeref_asserts().
+ */
+static inline void
+enable_rpm_wakeref_asserts(struct drm_i915_private *dev_priv)
+{
+	atomic_dec(&dev_priv->pm.wakeref_count);
+}
+
+/* TODO: convert users of these to rely instead on proper RPM refcounting */
+#define DISABLE_RPM_WAKEREF_ASSERTS(dev_priv)	\
+	disable_rpm_wakeref_asserts(dev_priv)
+
+#define ENABLE_RPM_WAKEREF_ASSERTS(dev_priv)	\
+	enable_rpm_wakeref_asserts(dev_priv)
+
 void intel_runtime_pm_get(struct drm_i915_private *dev_priv);
+bool intel_runtime_pm_get_if_in_use(struct drm_i915_private *dev_priv);
 void intel_runtime_pm_get_noresume(struct drm_i915_private *dev_priv);
 void intel_runtime_pm_put(struct drm_i915_private *dev_priv);
 
@@ -1409,7 +1498,8 @@ bool intel_sdvo_init(struct drm_device *dev, uint32_t sdvo_reg, bool is_sdvob);
 
 
 /* intel_sprite.c */
-int intel_plane_init(struct drm_device *dev, enum pipe pipe, int plane);
+struct drm_plane *intel_plane_init(struct drm_device *dev, enum pipe pipe,
+		int plane, enum drm_plane_type plane_type);
 int intel_sprite_set_colorkey(struct drm_device *dev, void *data,
 			      struct drm_file *file_priv);
 void intel_pipe_update_start(struct intel_crtc *crtc,
@@ -1453,5 +1543,11 @@ struct drm_plane_state *intel_plane_duplicate_state(struct drm_plane *plane);
 void intel_plane_destroy_state(struct drm_plane *plane,
 			       struct drm_plane_state *state);
 extern const struct drm_plane_helper_funcs intel_plane_helper_funcs;
+
+/* intel_color.c */
+void intel_color_init(struct drm_crtc *crtc);
+int intel_color_check(struct drm_crtc *crtc, struct drm_crtc_state *state);
+void intel_color_set_csc(struct drm_crtc *crtc);
+void intel_color_load_luts(struct drm_crtc *crtc);
 
 #endif /* __INTEL_DRV_H__ */

@@ -55,6 +55,8 @@ SCHED_FEAT(FORCE_SD_OVERLAP, false)
 SCHED_FEAT(RT_RUNTIME_SHARE, true)
 SCHED_FEAT(LB_MIN, false)
 
+SCHED_FEAT(ATTACH_AGE_LOAD, true)
+
 /*
  * Apply the automatic NUMA scheduling policy. Enabled automatically
  * at runtime if running on a NUMA machine. Can be controlled via
@@ -77,4 +79,12 @@ SCHED_FEAT(NUMA_FAVOUR_HIGHER, true)
  * due to CPU overload it is disabled by default.
  */
 SCHED_FEAT(NUMA_RESIST_LOWER, false)
+#endif
+
+#ifdef CONFIG_FAIR_GROUP_SCHED
+/*
+ * Energy aware scheduling. Use platform energy model to guide scheduling
+ * decisions optimizing for energy efficiency.
+ */
+SCHED_FEAT(ENERGY_AWARE, false)
 #endif

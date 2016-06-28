@@ -19,8 +19,14 @@
 #include <linux/delay.h>
 #include <linux/mmc/mmc.h>
 #include <linux/slab.h>
+#include <linux/reset.h>
 
 #include "sdhci-pltfm.h"
+
+#define CORE_MCI_VERSION		0x50
+#define CORE_VERSION_MAJOR_SHIFT	28
+#define CORE_VERSION_MAJOR_MASK		(0xf << CORE_VERSION_MAJOR_SHIFT)
+#define CORE_VERSION_MINOR_MASK		0xff
 
 #define CORE_HC_MODE		0x78
 #define HC_MODE_EN		0x1
@@ -38,8 +44,13 @@
 #define CORE_DLL_CONFIG		0x100
 #define CORE_DLL_STATUS		0x108
 
+#define CORE_DLL_CONFIG2	0x1b4
+#define CORE_DLL_CLK_DISABLE	BIT(21)
+
 #define CORE_VENDOR_SPEC	0x10c
 #define CORE_CLK_PWRSAVE	BIT(1)
+
+#define CORE_VENDOR_SPEC_CAPABILITIES0	0x11c
 
 #define CDR_SELEXT_SHIFT	20
 #define CDR_SELEXT_MASK		(0xf << CDR_SELEXT_SHIFT)
@@ -319,6 +330,10 @@ static int msm_init_cm_dll(struct sdhci_host *host)
 	writel_relaxed((readl_relaxed(host->ioaddr + CORE_DLL_CONFIG)
 			| CORE_CK_OUT_EN), host->ioaddr + CORE_DLL_CONFIG);
 
+	/* Write 0 to DLL_CLOCK_DISABLE bit of DLL_CONFIG_2 register */
+	writel_relaxed((readl_relaxed(host->ioaddr + CORE_DLL_CONFIG2)
+		& ~CORE_DLL_CLK_DISABLE), host->ioaddr + CORE_DLL_CONFIG2);
+
 	/* Wait until DLL_LOCK bit of DLL_STATUS register becomes '1' */
 	while (!(readl_relaxed(host->ioaddr + CORE_DLL_STATUS) &
 		 CORE_DLL_LOCK)) {
@@ -419,6 +434,25 @@ static struct sdhci_ops sdhci_msm_ops = {
 	.set_uhs_signaling = sdhci_set_uhs_signaling,
 };
 
+static void sdhci_reset_ddr_mmc_clock(struct device *dev)
+{
+	struct reset_control *sdhci_ddr_rst;
+	int ret;
+
+	sdhci_ddr_rst = reset_control_get(dev, "sdhci_ddr_pll_reset");
+
+	if (!IS_ERR_OR_NULL(sdhci_ddr_rst)) {
+		ret = reset_control_assert(sdhci_ddr_rst);
+		if (ret) {
+			dev_err(dev, "sdhci ddr ppl reset failed (%d)\n", ret);
+		}
+		else
+			dev_info(dev, "sdhci ddr ppl reset successfull\n");
+	}
+
+	reset_control_put(sdhci_ddr_rst);
+}
+
 static int sdhci_msm_probe(struct platform_device *pdev)
 {
 	struct sdhci_host *host;
@@ -426,7 +460,9 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 	struct sdhci_msm_host *msm_host;
 	struct resource *core_memres;
 	int ret;
-	u16 host_version;
+	u16 host_version, core_minor;
+	u32 core_version, caps, mclk_freq;
+	u8 core_major;
 
 	msm_host = devm_kzalloc(&pdev->dev, sizeof(*msm_host), GFP_KERNEL);
 	if (!msm_host)
@@ -480,9 +516,24 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 		goto pclk_disable;
 	}
 
+	mclk_freq = pltfm_host->clock;
+
+	/* Set the core clock frequency given in device-tree */
+	if (mclk_freq != 0) {
+		ret = clk_set_rate(msm_host->clk, mclk_freq);
+		if (ret) {
+			dev_err(&pdev->dev, "Failed to set clk rate %u\n", mclk_freq);
+			goto pclk_disable;
+		}
+		dev_info(&pdev->dev, "clock rate set to %u\n", mclk_freq);
+	}
+
 	ret = clk_prepare_enable(msm_host->clk);
 	if (ret)
 		goto pclk_disable;
+
+	if (host->quirks2 & SDHCI_QUIRK2_MMC_DISABLE_DDR_PLL_CLK_SRC)
+		sdhci_reset_ddr_mmc_clock(&pdev->dev);
 
 	core_memres = platform_get_resource(pdev, IORESOURCE_MEM, 1);
 	msm_host->core_mem = devm_ioremap_resource(&pdev->dev, core_memres);
@@ -515,6 +566,24 @@ static int sdhci_msm_probe(struct platform_device *pdev)
 	dev_dbg(&pdev->dev, "Host Version: 0x%x Vendor Version 0x%x\n",
 		host_version, ((host_version & SDHCI_VENDOR_VER_MASK) >>
 			       SDHCI_VENDOR_VER_SHIFT));
+
+	core_version = readl_relaxed(msm_host->core_mem + CORE_MCI_VERSION);
+	core_major = (core_version & CORE_VERSION_MAJOR_MASK) >>
+		      CORE_VERSION_MAJOR_SHIFT;
+	core_minor = core_version & CORE_VERSION_MINOR_MASK;
+	dev_dbg(&pdev->dev, "MCI Version: 0x%08x, major: 0x%04x, minor: 0x%02x\n",
+		core_version, core_major, core_minor);
+
+	/*
+	 * Support for some capabilities is not advertised by newer
+	 * controller versions and must be explicitly enabled.
+	 */
+	if (core_major >= 1 && core_minor != 0x11 && core_minor != 0x12) {
+		caps = readl_relaxed(host->ioaddr + SDHCI_CAPABILITIES);
+		caps |= SDHCI_CAN_VDD_300 | SDHCI_CAN_DO_8BIT;
+		writel_relaxed(caps, host->ioaddr +
+			       CORE_VENDOR_SPEC_CAPABILITIES0);
+	}
 
 	ret = sdhci_add_host(host);
 	if (ret)

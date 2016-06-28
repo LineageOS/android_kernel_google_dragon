@@ -19,6 +19,7 @@
 
 #include "cfg80211.h"
 #include "main.h"
+#include "wmm.h"
 
 static char *reg_alpha2;
 module_param(reg_alpha2, charp, 0);
@@ -1547,6 +1548,9 @@ mwifiex_cfg80211_disconnect(struct wiphy *wiphy, struct net_device *dev,
 {
 	struct mwifiex_private *priv = mwifiex_netdev_get_priv(dev);
 
+	if (!mwifiex_stop_bg_scan(priv))
+		cfg80211_sched_scan_stopped_rtnl(priv->wdev.wiphy);
+
 	if (mwifiex_deauthenticate(priv, NULL))
 		return -EFAULT;
 
@@ -1599,8 +1603,10 @@ static int mwifiex_cfg80211_inform_ibss_bss(struct mwifiex_private *priv)
 				  CFG80211_BSS_FTYPE_UNKNOWN,
 				  bss_info.bssid, 0, WLAN_CAPABILITY_IBSS,
 				  0, ie_buf, ie_len, 0, GFP_KERNEL);
-	cfg80211_put_bss(priv->wdev.wiphy, bss);
-	memcpy(priv->cfg_bssid, bss_info.bssid, ETH_ALEN);
+	if (bss) {
+		cfg80211_put_bss(priv->wdev.wiphy, bss);
+		ether_addr_copy(priv->cfg_bssid, bss_info.bssid);
+	}
 
 	return 0;
 }
@@ -1809,6 +1815,9 @@ mwifiex_cfg80211_connect(struct wiphy *wiphy, struct net_device *dev,
 		    "info: Trying to associate to %s and bssid %pM\n",
 		    (char *)sme->ssid, sme->bssid);
 
+	if (!mwifiex_stop_bg_scan(priv))
+		cfg80211_sched_scan_stopped_rtnl(priv->wdev.wiphy);
+
 	ret = mwifiex_cfg80211_assoc(priv, sme->ssid_len, sme->ssid, sme->bssid,
 				     priv->bss_mode, sme->channel, sme, 0);
 	if (!ret) {
@@ -2009,6 +2018,9 @@ mwifiex_cfg80211_scan(struct wiphy *wiphy,
 		return -EBUSY;
 	}
 
+	if (!mwifiex_stop_bg_scan(priv))
+		cfg80211_sched_scan_stopped_rtnl(priv->wdev.wiphy);
+
 	user_scan_cfg = kzalloc(sizeof(*user_scan_cfg), GFP_KERNEL);
 	if (!user_scan_cfg)
 		return -ENOMEM;
@@ -2073,6 +2085,124 @@ mwifiex_cfg80211_scan(struct wiphy *wiphy,
 			}
 		}
 	}
+	return 0;
+}
+
+/* CFG802.11 operation handler for sched_scan_start.
+ *
+ * This function issues a bgscan config request to the firmware based upon
+ * the user specified sched_scan configuration. On successful completion,
+ * firmware will generate BGSCAN_REPORT event, driver should issue bgscan
+ * query command to get sched_scan results from firmware.
+ */
+static int
+mwifiex_cfg80211_sched_scan_start(struct wiphy *wiphy,
+				  struct net_device *dev,
+				  struct cfg80211_sched_scan_request *request)
+{
+	struct mwifiex_private *priv = mwifiex_netdev_get_priv(dev);
+	int i, offset;
+	struct ieee80211_channel *chan;
+	struct mwifiex_bg_scan_cfg *bgscan_cfg;
+	struct ieee_types_header *ie;
+
+	if (!request || (!request->n_ssids && !request->n_match_sets)) {
+		wiphy_err(wiphy, "%s : Invalid Sched_scan parameters",
+			  __func__);
+		return -EINVAL;
+	}
+
+	wiphy_info(wiphy, "sched_scan start : n_ssids=%d n_match_sets=%d ",
+		   request->n_ssids, request->n_match_sets);
+	wiphy_info(wiphy, "n_channels=%d interval=%d ie_len=%d\n",
+		   request->n_channels, request->interval,
+		   (int)request->ie_len);
+
+	bgscan_cfg = kzalloc(sizeof(*bgscan_cfg), GFP_KERNEL);
+	if (!bgscan_cfg)
+		return -ENOMEM;
+
+	if (priv->scan_request || priv->scan_aborting)
+		bgscan_cfg->start_later = true;
+
+	bgscan_cfg->num_ssids = request->n_match_sets;
+	bgscan_cfg->ssid_list = request->match_sets;
+
+	if (request->ie && request->ie_len) {
+		offset = 0;
+		for (i = 0; i < MWIFIEX_MAX_VSIE_NUM; i++) {
+			if (priv->vs_ie[i].mask != MWIFIEX_VSIE_MASK_CLEAR)
+				continue;
+			priv->vs_ie[i].mask = MWIFIEX_VSIE_MASK_BGSCAN;
+			ie = (struct ieee_types_header *)(request->ie + offset);
+			memcpy(&priv->vs_ie[i].ie, ie, sizeof(*ie) + ie->len);
+			offset += sizeof(*ie) + ie->len;
+
+			if (offset >= request->ie_len)
+				break;
+		}
+	}
+
+	for (i = 0; i < min_t(u32, request->n_channels,
+			      MWIFIEX_BG_SCAN_CHAN_MAX); i++) {
+		chan = request->channels[i];
+		bgscan_cfg->chan_list[i].chan_number = chan->hw_value;
+		bgscan_cfg->chan_list[i].radio_type = chan->band;
+
+		if ((chan->flags & IEEE80211_CHAN_NO_IR) || !request->n_ssids)
+			bgscan_cfg->chan_list[i].scan_type =
+						MWIFIEX_SCAN_TYPE_PASSIVE;
+		else
+			bgscan_cfg->chan_list[i].scan_type =
+						MWIFIEX_SCAN_TYPE_ACTIVE;
+
+		bgscan_cfg->chan_list[i].scan_time = 0;
+	}
+
+	bgscan_cfg->chan_per_scan = min_t(u32, request->n_channels,
+					  MWIFIEX_BG_SCAN_CHAN_MAX);
+
+	/* Use at least 15 second for per scan cycle */
+	bgscan_cfg->scan_interval = (request->interval >
+				     MWIFIEX_BGSCAN_INTERVAL) ?
+				request->interval : MWIFIEX_BGSCAN_INTERVAL;
+
+	bgscan_cfg->repeat_count = MWIFIEX_BGSCAN_REPEAT_COUNT;
+	bgscan_cfg->report_condition = MWIFIEX_BGSCAN_SSID_MATCH |
+				MWIFIEX_BGSCAN_WAIT_ALL_CHAN_DONE;
+	bgscan_cfg->bss_type = MWIFIEX_BSS_MODE_INFRA;
+	bgscan_cfg->action = MWIFIEX_BGSCAN_ACT_SET;
+	bgscan_cfg->enable = true;
+	if (request->min_rssi_thold != NL80211_SCAN_RSSI_THOLD_OFF) {
+		bgscan_cfg->report_condition |= MWIFIEX_BGSCAN_SSID_RSSI_MATCH;
+		bgscan_cfg->rssi_threshold = request->min_rssi_thold;
+	}
+
+	if (mwifiex_send_cmd(priv, HostCmd_CMD_802_11_BG_SCAN_CONFIG,
+			     HostCmd_ACT_GEN_SET, 0, bgscan_cfg, true)) {
+		kfree(bgscan_cfg);
+		return -EFAULT;
+	}
+
+	priv->sched_scanning = true;
+
+	kfree(bgscan_cfg);
+	return 0;
+}
+
+/* CFG802.11 operation handler for sched_scan_stop.
+ *
+ * This function issues a bgscan config command to disable
+ * previous bgscan configuration in the firmware
+ */
+static int mwifiex_cfg80211_sched_scan_stop(struct wiphy *wiphy,
+					    struct net_device *dev)
+{
+	struct mwifiex_private *priv = mwifiex_netdev_get_priv(dev);
+
+	wiphy_info(wiphy, "sched scan stop!");
+	mwifiex_stop_bg_scan(priv);
+
 	return 0;
 }
 
@@ -2368,6 +2498,9 @@ int mwifiex_del_virtual_intf(struct wiphy *wiphy, struct wireless_dev *wdev)
 #endif
 	mwifiex_sysfs_unregister(priv);
 
+	if (priv->sched_scanning)
+		priv->sched_scanning = false;
+
 	mwifiex_stop_net_dev_queue(priv->netdev, priv->adapter);
 
 	if (netif_carrier_ok(priv->netdev))
@@ -2526,10 +2659,12 @@ static int mwifiex_set_wowlan_mef_entry(struct mwifiex_private *priv,
 				sizeof(byte_seq));
 		mef_entry->filter[filt_num].filt_type = TYPE_EQ;
 
-		if (first_pat)
+		if (first_pat) {
 			first_pat = false;
-		else
+			mwifiex_dbg(priv->adapter, INFO, "Wake on patterns\n");
+		} else {
 			mef_entry->filter[filt_num].filt_action = TYPE_AND;
+		}
 
 		filt_num++;
 	}
@@ -2555,6 +2690,7 @@ static int mwifiex_set_wowlan_mef_entry(struct mwifiex_private *priv,
 		mef_entry->filter[filt_num].offset = 56;
 		mef_entry->filter[filt_num].filt_type = TYPE_EQ;
 		mef_entry->filter[filt_num].filt_action = TYPE_OR;
+		mwifiex_dbg(priv->adapter, INFO, "Wake on magic packet\n");
 	}
 	return ret;
 }
@@ -2607,10 +2743,27 @@ static int mwifiex_cfg80211_suspend(struct wiphy *wiphy,
 {
 	struct mwifiex_adapter *adapter = mwifiex_cfg80211_get_adapter(wiphy);
 	struct mwifiex_ds_hs_cfg hs_cfg;
-	int ret = 0;
+	int i, ret = 0, retry_num = 10;
 	struct mwifiex_private *priv;
 
 	mwifiex_cancel_all_pending_cmd(adapter);
+
+	for (i = 0; i < adapter->priv_num; i++) {
+		priv = adapter->priv[i];
+		if (priv && priv->netdev) {
+			mwifiex_stop_net_dev_queue(priv->netdev, adapter);
+			if (netif_carrier_ok(priv->netdev))
+				netif_carrier_off(priv->netdev);
+		}
+	}
+
+	for (i = 0; i < retry_num; i++) {
+		if (!mwifiex_wmm_lists_empty(adapter) ||
+		    !skb_queue_empty(&adapter->tx_data_q))
+			usleep_range(10000, 15000);
+		else
+			break;
+	}
 
 	if (!wowlan) {
 		dev_warn(adapter->dev, "None of the WOWLAN triggers enabled\n");
@@ -2619,7 +2772,7 @@ static int mwifiex_cfg80211_suspend(struct wiphy *wiphy,
 
 	priv = mwifiex_get_priv(adapter, MWIFIEX_BSS_ROLE_STA);
 
-	if (!priv->media_connected) {
+	if (!priv->media_connected && !wowlan->nd_config) {
 		dev_warn(adapter->dev,
 			 "Can not configure WOWLAN in disconnected state\n");
 		return 0;
@@ -2631,18 +2784,30 @@ static int mwifiex_cfg80211_suspend(struct wiphy *wiphy,
 		return ret;
 	}
 
+	memset(&hs_cfg, 0, sizeof(hs_cfg));
+	hs_cfg.conditions = le32_to_cpu(adapter->hs_cfg.conditions);
+
+	if (wowlan->nd_config) {
+		mwifiex_dbg(adapter, INFO, "Wake on net detect\n");
+		hs_cfg.conditions |= HS_CFG_COND_MAC_EVENT;
+		mwifiex_cfg80211_sched_scan_start(wiphy, priv->netdev,
+						  wowlan->nd_config);
+	}
+
 	if (wowlan->disconnect) {
-		memset(&hs_cfg, 0, sizeof(hs_cfg));
-		hs_cfg.is_invoke_hostcmd = false;
-		hs_cfg.conditions = HS_CFG_COND_MAC_EVENT;
-		hs_cfg.gpio = HS_CFG_GPIO_DEF;
-		hs_cfg.gap = HS_CFG_GAP_DEF;
-		ret = mwifiex_set_hs_params(priv, HostCmd_ACT_GEN_SET,
-					    MWIFIEX_SYNC_CMD, &hs_cfg);
-		if (ret) {
-			dev_err(adapter->dev, "Failed to set HS params\n");
-			return ret;
-		}
+		hs_cfg.conditions |= HS_CFG_COND_MAC_EVENT;
+		mwifiex_dbg(priv->adapter, INFO, "Wake on device disconnect\n");
+	}
+
+	hs_cfg.is_invoke_hostcmd = false;
+	hs_cfg.gpio = adapter->hs_cfg.gpio;
+	hs_cfg.gap = adapter->hs_cfg.gap;
+	ret = mwifiex_set_hs_params(priv, HostCmd_ACT_GEN_SET,
+				    MWIFIEX_SYNC_CMD, &hs_cfg);
+	if (ret) {
+		mwifiex_dbg(adapter, ERROR,
+			    "Failed to set HS params\n");
+		return ret;
 	}
 
 	return ret;
@@ -2650,6 +2815,74 @@ static int mwifiex_cfg80211_suspend(struct wiphy *wiphy,
 
 static int mwifiex_cfg80211_resume(struct wiphy *wiphy)
 {
+	struct mwifiex_adapter *adapter = mwifiex_cfg80211_get_adapter(wiphy);
+	struct mwifiex_private *priv;
+	struct mwifiex_ds_wakeup_reason wakeup_reason;
+	struct cfg80211_wowlan_wakeup wakeup_report;
+	int i;
+	bool report_wakeup_reason = true;
+
+	for (i = 0; i < adapter->priv_num; i++) {
+		priv = adapter->priv[i];
+		if (priv && priv->netdev) {
+			if (!netif_carrier_ok(priv->netdev))
+				netif_carrier_on(priv->netdev);
+			mwifiex_wake_up_net_dev_queue(priv->netdev, adapter);
+		}
+	}
+
+	if (!wiphy->wowlan_config)
+		goto done;
+
+	priv = mwifiex_get_priv(adapter, MWIFIEX_BSS_ROLE_STA);
+	mwifiex_get_wakeup_reason(priv, HostCmd_ACT_GEN_GET, MWIFIEX_SYNC_CMD,
+				  &wakeup_reason);
+	memset(&wakeup_report, 0, sizeof(struct cfg80211_wowlan_wakeup));
+
+	wakeup_report.pattern_idx = -1;
+
+	switch (wakeup_reason.hs_wakeup_reason) {
+	case NO_HSWAKEUP_REASON:
+		break;
+	case BCAST_DATA_MATCHED:
+		break;
+	case MCAST_DATA_MATCHED:
+		break;
+	case UCAST_DATA_MATCHED:
+		break;
+	case MASKTABLE_EVENT_MATCHED:
+		break;
+	case NON_MASKABLE_EVENT_MATCHED:
+		if (wiphy->wowlan_config->disconnect)
+			wakeup_report.disconnect = true;
+		if (wiphy->wowlan_config->nd_config)
+			wakeup_report.net_detect = adapter->nd_info;
+		break;
+	case NON_MASKABLE_CONDITION_MATCHED:
+		break;
+	case MAGIC_PATTERN_MATCHED:
+		if (wiphy->wowlan_config->magic_pkt)
+			wakeup_report.magic_pkt = true;
+		if (wiphy->wowlan_config->n_patterns)
+			wakeup_report.pattern_idx = 1;
+		break;
+	default:
+		report_wakeup_reason = false;
+		break;
+	}
+
+	if (report_wakeup_reason)
+		cfg80211_report_wowlan_wakeup(&priv->wdev, &wakeup_report,
+					      GFP_KERNEL);
+
+done:
+	if (adapter->nd_info) {
+		for (i = 0 ; i < adapter->nd_info->n_matches ; i++)
+			kfree(adapter->nd_info->matches[i]);
+		kfree(adapter->nd_info);
+		adapter->nd_info = NULL;
+	}
+
 	return 0;
 }
 
@@ -2969,6 +3202,8 @@ static struct cfg80211_ops mwifiex_cfg80211_ops = {
 	.set_cqm_rssi_config = mwifiex_cfg80211_set_cqm_rssi_config,
 	.set_antenna = mwifiex_cfg80211_set_antenna,
 	.del_station = mwifiex_cfg80211_del_station,
+	.sched_scan_start = mwifiex_cfg80211_sched_scan_start,
+	.sched_scan_stop = mwifiex_cfg80211_sched_scan_stop,
 #ifdef CONFIG_PM
 	.suspend = mwifiex_cfg80211_suspend,
 	.resume = mwifiex_cfg80211_resume,
@@ -2983,11 +3218,13 @@ static struct cfg80211_ops mwifiex_cfg80211_ops = {
 
 #ifdef CONFIG_PM
 static const struct wiphy_wowlan_support mwifiex_wowlan_support = {
-	.flags = WIPHY_WOWLAN_MAGIC_PKT | WIPHY_WOWLAN_DISCONNECT,
+	.flags = WIPHY_WOWLAN_MAGIC_PKT | WIPHY_WOWLAN_DISCONNECT |
+		WIPHY_WOWLAN_NET_DETECT,
 	.n_patterns = MWIFIEX_MEF_MAX_FILTERS,
 	.pattern_min_len = 1,
 	.pattern_max_len = MWIFIEX_MAX_PATTERN_LEN,
 	.max_pkt_offset = MWIFIEX_MAX_OFFSET_LEN,
+	.max_nd_match_sets = MWIFIEX_MAX_ND_MATCH_SETS,
 };
 #endif
 
@@ -3064,6 +3301,7 @@ int mwifiex_register_cfg80211(struct mwifiex_adapter *adapter)
 	wiphy->flags |= WIPHY_FLAG_HAVE_AP_SME |
 			WIPHY_FLAG_AP_PROBE_RESP_OFFLOAD |
 			WIPHY_FLAG_AP_UAPSD |
+			WIPHY_FLAG_SUPPORTS_SCHED_SCAN |
 			WIPHY_FLAG_HAS_REMAIN_ON_CHANNEL;
 
 	if (ISSUPP_TDLS_ENABLED(adapter->fw_cap_info))
@@ -3080,11 +3318,16 @@ int mwifiex_register_cfg80211(struct mwifiex_adapter *adapter)
 				    NL80211_PROBE_RESP_OFFLOAD_SUPPORT_WPS2 |
 				    NL80211_PROBE_RESP_OFFLOAD_SUPPORT_P2P;
 
+	wiphy->max_sched_scan_ssids = MWIFIEX_MAX_SSID_LIST_LENGTH;
+	wiphy->max_sched_scan_ie_len = MWIFIEX_MAX_VSIE_LEN;
+	wiphy->max_match_sets = MWIFIEX_MAX_SSID_LIST_LENGTH;
+
 	wiphy->available_antennas_tx = BIT(adapter->number_of_antenna) - 1;
 	wiphy->available_antennas_rx = BIT(adapter->number_of_antenna) - 1;
 
 	wiphy->features |= NL80211_FEATURE_HT_IBSS |
 			   NL80211_FEATURE_INACTIVITY_TIMER |
+			   NL80211_FEATURE_LOW_PRIORITY_SCAN |
 			   NL80211_FEATURE_NEED_OBSS_SCAN;
 
 	/* Reserve space for mwifiex specific private data for BSS */

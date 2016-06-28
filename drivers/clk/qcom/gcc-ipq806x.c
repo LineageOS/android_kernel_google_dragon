@@ -75,6 +75,17 @@ static struct clk_pll pll3 = {
 	},
 };
 
+static struct clk_regmap pll4_vote = {
+	.enable_reg = 0x34c0,
+	.enable_mask = BIT(4),
+	.hw.init = &(struct clk_init_data){
+		.name = "pll4_vote",
+		.parent_names = (const char *[]){ "pll4" },
+		.num_parents = 1,
+		.ops = &clk_pll_vote_ops,
+	},
+};
+
 static struct clk_pll pll8 = {
 	.l_reg = 0x3144,
 	.m_reg = 0x3148,
@@ -129,15 +140,17 @@ static struct clk_regmap pll14_vote = {
 	},
 };
 
-#define P_PXO	0
-#define P_PLL8	1
-#define P_PLL3	1
-#define P_PLL0	2
-#define P_CXO	2
+enum {
+	P_PXO,
+	P_PLL8,
+	P_PLL3,
+	P_PLL0,
+	P_CXO,
+};
 
-static const u8 gcc_pxo_pll8_map[] = {
-	[P_PXO]		= 0,
-	[P_PLL8]	= 3,
+static const struct parent_map gcc_pxo_pll8_map[] = {
+	{ P_PXO, 0 },
+	{ P_PLL8, 3 }
 };
 
 static const char *gcc_pxo_pll8[] = {
@@ -145,10 +158,10 @@ static const char *gcc_pxo_pll8[] = {
 	"pll8_vote",
 };
 
-static const u8 gcc_pxo_pll8_cxo_map[] = {
-	[P_PXO]		= 0,
-	[P_PLL8]	= 3,
-	[P_CXO]		= 5,
+static const struct parent_map gcc_pxo_pll8_cxo_map[] = {
+	{ P_PXO, 0 },
+	{ P_PLL8, 3 },
+	{ P_CXO, 5 }
 };
 
 static const char *gcc_pxo_pll8_cxo[] = {
@@ -157,14 +170,14 @@ static const char *gcc_pxo_pll8_cxo[] = {
 	"cxo",
 };
 
-static const u8 gcc_pxo_pll3_map[] = {
-	[P_PXO]		= 0,
-	[P_PLL3]	= 1,
+static const struct parent_map gcc_pxo_pll3_map[] = {
+	{ P_PXO, 0 },
+	{ P_PLL3, 1 }
 };
 
-static const u8 gcc_pxo_pll3_sata_map[] = {
-	[P_PXO]		= 0,
-	[P_PLL3]	= 6,
+static const struct parent_map gcc_pxo_pll3_sata_map[] = {
+	{ P_PXO, 0 },
+	{ P_PLL3, 6 }
 };
 
 static const char *gcc_pxo_pll3[] = {
@@ -172,10 +185,10 @@ static const char *gcc_pxo_pll3[] = {
 	"pll3",
 };
 
-static const u8 gcc_pxo_pll8_pll0[] = {
-	[P_PXO]		= 0,
-	[P_PLL8]	= 3,
-	[P_PLL0]	= 2,
+static const struct parent_map gcc_pxo_pll8_pll0[] = {
+	{ P_PXO, 0 },
+	{ P_PLL8, 3 },
+	{ P_PLL0, 2 }
 };
 
 static const char *gcc_pxo_pll8_pll0_map[] = {
@@ -2163,6 +2176,7 @@ static struct clk_regmap *gcc_ipq806x_clks[] = {
 	[PLL0] = &pll0.clkr,
 	[PLL0_VOTE] = &pll0_vote,
 	[PLL3] = &pll3.clkr,
+	[PLL4_VOTE] = &pll4_vote,
 	[PLL8] = &pll8.clkr,
 	[PLL8_VOTE] = &pll8_vote,
 	[PLL14] = &pll14.clkr,

@@ -17,7 +17,7 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 
-#include <media/videobuf2-core.h>
+#include <media/videobuf2-v4l2.h>
 #include <media/v4l2-mem2mem.h>
 #include <media/v4l2-dev.h>
 #include <media/v4l2-fh.h>
@@ -427,6 +427,25 @@ int v4l2_m2m_dqbuf(struct file *file, struct v4l2_m2m_ctx *m2m_ctx,
 EXPORT_SYMBOL_GPL(v4l2_m2m_dqbuf);
 
 /**
+ * v4l2_m2m_prepare_buf() - prepare a source or destination buffer, depending on
+ * the type
+ */
+int v4l2_m2m_prepare_buf(struct file *file, struct v4l2_m2m_ctx *m2m_ctx,
+			 struct v4l2_buffer *buf)
+{
+	struct vb2_queue *vq;
+	int ret;
+
+	vq = v4l2_m2m_get_vq(m2m_ctx, buf->type);
+	ret = vb2_prepare_buf(vq, buf);
+	if (!ret)
+		v4l2_m2m_try_schedule(m2m_ctx);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(v4l2_m2m_prepare_buf);
+
+/**
  * v4l2_m2m_create_bufs() - create a source or destination buffer, depending
  * on the type
  */
@@ -740,13 +759,15 @@ EXPORT_SYMBOL_GPL(v4l2_m2m_ctx_release);
  *
  * Call from buf_queue(), videobuf_queue_ops callback.
  */
-void v4l2_m2m_buf_queue(struct v4l2_m2m_ctx *m2m_ctx, struct vb2_buffer *vb)
+void v4l2_m2m_buf_queue(struct v4l2_m2m_ctx *m2m_ctx,
+		struct vb2_v4l2_buffer *vbuf)
 {
-	struct v4l2_m2m_buffer *b = container_of(vb, struct v4l2_m2m_buffer, vb);
+	struct v4l2_m2m_buffer *b = container_of(vbuf,
+				struct v4l2_m2m_buffer, vb);
 	struct v4l2_m2m_queue_ctx *q_ctx;
 	unsigned long flags;
 
-	q_ctx = get_queue_ctx(m2m_ctx, vb->vb2_queue->type);
+	q_ctx = get_queue_ctx(m2m_ctx, vbuf->vb2_buf.vb2_queue->type);
 	if (!q_ctx)
 		return;
 
@@ -803,6 +824,15 @@ int v4l2_m2m_ioctl_dqbuf(struct file *file, void *priv,
 	return v4l2_m2m_dqbuf(file, fh->m2m_ctx, buf);
 }
 EXPORT_SYMBOL_GPL(v4l2_m2m_ioctl_dqbuf);
+
+int v4l2_m2m_ioctl_prepare_buf(struct file *file, void *priv,
+			       struct v4l2_buffer *buf)
+{
+	struct v4l2_fh *fh = file->private_data;
+
+	return v4l2_m2m_prepare_buf(file, fh->m2m_ctx, buf);
+}
+EXPORT_SYMBOL_GPL(v4l2_m2m_ioctl_prepare_buf);
 
 int v4l2_m2m_ioctl_expbuf(struct file *file, void *priv,
 				struct v4l2_exportbuffer *eb)

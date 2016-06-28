@@ -39,6 +39,8 @@ struct rfc1042_hdr {
 	__be16 snap_type;
 } __packed;
 
+#define INTEROP_2G_256QAM_CAPBILITY   1
+
 struct ath10k *ath10k_mac_create(size_t priv_size);
 void ath10k_mac_destroy(struct ath10k *ar);
 int ath10k_mac_register(struct ath10k *ar);
@@ -61,12 +63,12 @@ int ath10k_mac_vif_chan(struct ieee80211_vif *vif,
 
 void ath10k_mac_handle_beacon(struct ath10k *ar, struct sk_buff *skb);
 void ath10k_mac_handle_beacon_miss(struct ath10k *ar, u32 vdev_id);
-void ath10k_mac_handle_tx_pause(struct ath10k *ar, u32 vdev_id,
-				enum wmi_tlv_tx_pause_id pause_id,
-				enum wmi_tlv_tx_pause_action action);
+void ath10k_mac_handle_tx_pause_vdev(struct ath10k *ar, u32 vdev_id,
+				     enum wmi_tlv_tx_pause_id pause_id,
+				     enum wmi_tlv_tx_pause_action action);
 
 u8 ath10k_mac_hw_rate_to_idx(const struct ieee80211_supported_band *sband,
-			     u8 hw_rate);
+			     u8 hw_rate, bool cck);
 u8 ath10k_mac_bitrate_to_idx(const struct ieee80211_supported_band *sband,
 			     u32 bitrate);
 
@@ -74,6 +76,13 @@ void ath10k_mac_tx_lock(struct ath10k *ar, int reason);
 void ath10k_mac_tx_unlock(struct ath10k *ar, int reason);
 void ath10k_mac_vif_tx_lock(struct ath10k_vif *arvif, int reason);
 void ath10k_mac_vif_tx_unlock(struct ath10k_vif *arvif, int reason);
+bool ath10k_mac_tx_frm_has_freq(struct ath10k *ar);
+void ath10k_mac_tx_push_pending(struct ath10k *ar);
+int ath10k_mac_tx_push_txq(struct ieee80211_hw *hw,
+			   struct ieee80211_txq *txq);
+struct ieee80211_txq *ath10k_mac_txq_lookup(struct ath10k *ar,
+					    u16 peer_id,
+					    u8 tid);
 
 static inline struct ath10k_vif *ath10k_vif_to_arvif(struct ieee80211_vif *vif)
 {

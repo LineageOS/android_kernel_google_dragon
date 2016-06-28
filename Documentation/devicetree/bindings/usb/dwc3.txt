@@ -14,6 +14,12 @@ Optional properties:
  - phys: from the *Generic PHY* bindings
  - phy-names: from the *Generic PHY* bindings
  - tx-fifo-resize: determines if the FIFO *has* to be reallocated.
+ - snps,disable_scramble_quirk: true when SW should disable data scrambling.
+	Only really useful for FPGA builds.
+ - snps,has-lpm-erratum: true when DWC3 was configured with LPM Erratum enabled
+ - snps,lpm-nyet-threshold: LPM NYET threshold
+ - snps,u2exit_lfps_quirk: set if we want to enable u2exit lfps quirk
+ - snps,u2ss_inp3_quirk: set if we enable P3 OK for U2/SS Inactive quirk
 
 This is usually a subnode to DWC3 glue to which it is connected.
 

@@ -26,7 +26,7 @@
 #include <media/v4l2-fh.h>
 #include <media/v4l2-event.h>
 #include <media/v4l2-device.h>
-#include <media/videobuf2-core.h>
+#include <media/videobuf2-v4l2.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/v4l2.h>
@@ -257,7 +257,8 @@ static void v4l_print_format(const void *arg, bool write_only)
 		pr_cont(", width=%u, height=%u, "
 			"pixelformat=%c%c%c%c, field=%s, "
 			"bytesperline=%u, sizeimage=%u, colorspace=%d, "
-			"flags %u\n",
+			"flags=0x%x, ycbcr_enc=%u, quantization=%u, "
+			"xfer_func=%u\n",
 			pix->width, pix->height,
 			(pix->pixelformat & 0xff),
 			(pix->pixelformat >>  8) & 0xff,
@@ -265,21 +266,24 @@ static void v4l_print_format(const void *arg, bool write_only)
 			(pix->pixelformat >> 24) & 0xff,
 			prt_names(pix->field, v4l2_field_names),
 			pix->bytesperline, pix->sizeimage,
-			pix->colorspace, pix->flags);
+			pix->colorspace, pix->flags, pix->ycbcr_enc,
+			pix->quantization, pix->xfer_func);
 		break;
 	case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
 	case V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE:
 		mp = &p->fmt.pix_mp;
 		pr_cont(", width=%u, height=%u, "
 			"format=%c%c%c%c, field=%s, "
-			"colorspace=%d, num_planes=%u\n",
+			"colorspace=%d, num_planes=%u, flags=0x%x, "
+			"ycbcr_enc=%u, quantization=%u, xfer_func=%u\n",
 			mp->width, mp->height,
 			(mp->pixelformat & 0xff),
 			(mp->pixelformat >>  8) & 0xff,
 			(mp->pixelformat >> 16) & 0xff,
 			(mp->pixelformat >> 24) & 0xff,
 			prt_names(mp->field, v4l2_field_names),
-			mp->colorspace, mp->num_planes);
+			mp->colorspace, mp->num_planes, mp->flags,
+			mp->ycbcr_enc, mp->quantization, mp->xfer_func);
 		for (i = 0; i < mp->num_planes; i++)
 			printk(KERN_DEBUG "plane %u: bytesperline=%u sizeimage=%u\n", i,
 					mp->plane_fmt[i].bytesperline,
@@ -1007,9 +1011,12 @@ static int v4l_querycap(const struct v4l2_ioctl_ops *ops,
 				struct file *file, void *fh, void *arg)
 {
 	struct v4l2_capability *cap = (struct v4l2_capability *)arg;
+	struct video_device *vfd = video_devdata(file);
 	int ret;
 
 	cap->version = LINUX_VERSION_CODE;
+	cap->device_caps = vfd->device_caps;
+	cap->capabilities = vfd->device_caps | V4L2_CAP_DEVICE_CAPS;
 
 	ret = ops->vidioc_querycap(file, fh, cap);
 

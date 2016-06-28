@@ -1728,6 +1728,22 @@ static int mwifiex_cmd_sdio_rx_aggr_cfg(struct host_cmd_ds_command *cmd,
 	return 0;
 }
 
+/* This function prepares command to get HS wakeup reason.
+ *
+ * Preparation includes -
+ *      - Setting command ID, action and proper size
+ *      - Ensuring correct endian-ness
+ */
+static int mwifiex_cmd_get_wakeup_reason(struct mwifiex_private *priv,
+					 struct host_cmd_ds_command *cmd)
+{
+	cmd->command = cpu_to_le16(HostCmd_CMD_HS_WAKEUP_REASON);
+	cmd->size = cpu_to_le16(sizeof(struct host_cmd_ds_wakeup_reason) +
+				S_DS_GEN);
+
+	return 0;
+}
+
 /*
  * This function prepares the commands before sending them to the firmware.
  *
@@ -1787,6 +1803,10 @@ int mwifiex_sta_prepare_cmd(struct mwifiex_private *priv, uint16_t cmd_no,
 		break;
 	case HostCmd_CMD_802_11_SCAN:
 		ret = mwifiex_cmd_802_11_scan(cmd_ptr, data_buf);
+		break;
+	case HostCmd_CMD_802_11_BG_SCAN_CONFIG:
+		ret = mwifiex_cmd_802_11_bg_scan_config(priv, cmd_ptr,
+							data_buf);
 		break;
 	case HostCmd_CMD_802_11_BG_SCAN_QUERY:
 		ret = mwifiex_cmd_802_11_bg_scan_query(cmd_ptr);
@@ -1968,6 +1988,10 @@ int mwifiex_sta_prepare_cmd(struct mwifiex_private *priv, uint16_t cmd_no,
 		ret = mwifiex_cmd_sdio_rx_aggr_cfg(cmd_ptr, cmd_action,
 						   data_buf);
 		break;
+	case HostCmd_CMD_HS_WAKEUP_REASON:
+		ret = mwifiex_cmd_get_wakeup_reason(priv, cmd_ptr);
+		break;
+
 	default:
 		mwifiex_dbg(priv->adapter, ERROR,
 			    "PREP_CMD: unknown cmd- %#x\n", cmd_no);
@@ -2006,6 +2030,7 @@ int mwifiex_sta_init_cmd(struct mwifiex_private *priv, u8 first_sta)
 	enum state_11d_t state_11d;
 	struct mwifiex_ds_11n_tx_cfg tx_cfg;
 	u8 sdio_sp_rx_aggr_enable;
+	int data;
 
 	if (first_sta) {
 		if (priv->adapter->iface_type == MWIFIEX_PCIE) {
@@ -2026,9 +2051,16 @@ int mwifiex_sta_init_cmd(struct mwifiex_private *priv, u8 first_sta)
 		 * The cal-data can be read from device tree and/or
 		 * a configuration file and downloaded to firmware.
 		 */
-		adapter->dt_node =
-				of_find_node_by_name(NULL, "marvell_cfgdata");
-		if (adapter->dt_node) {
+		if (priv->adapter->iface_type == MWIFIEX_SDIO &&
+		    adapter->dev->of_node) {
+			adapter->dt_node = adapter->dev->of_node;
+			if (of_property_read_u32(adapter->dt_node,
+						 "marvell,wakeup-pin",
+						 &data) == 0) {
+				pr_debug("Wakeup pin = 0x%x\n", data);
+				adapter->hs_cfg.gpio = data;
+			}
+
 			ret = mwifiex_dnld_dt_cfgdata(priv, adapter->dt_node,
 						      "marvell,caldata");
 			if (ret)
@@ -2051,7 +2083,8 @@ int mwifiex_sta_init_cmd(struct mwifiex_private *priv, u8 first_sta)
 
 		/** Set SDIO Single Port RX Aggr Info */
 		if (priv->adapter->iface_type == MWIFIEX_SDIO &&
-		    ISSUPP_SDIO_SPA_ENABLED(priv->adapter->fw_cap_info)) {
+		    ISSUPP_SDIO_SPA_ENABLED(priv->adapter->fw_cap_info) &&
+		    !priv->adapter->host_disable_sdio_rx_aggr) {
 			sdio_sp_rx_aggr_enable = true;
 			ret = mwifiex_send_cmd(priv,
 					       HostCmd_CMD_SDIO_SP_RX_AGGR_CFG,

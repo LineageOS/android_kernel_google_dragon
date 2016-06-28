@@ -29,7 +29,7 @@ static const struct drm_framebuffer_funcs cirrus_fb_funcs = {
 
 int cirrus_framebuffer_init(struct drm_device *dev,
 			    struct cirrus_framebuffer *gfb,
-			    struct drm_mode_fb_cmd2 *mode_cmd,
+			    const struct drm_mode_fb_cmd2 *mode_cmd,
 			    struct drm_gem_object *obj)
 {
 	int ret;
@@ -47,7 +47,7 @@ int cirrus_framebuffer_init(struct drm_device *dev,
 static struct drm_framebuffer *
 cirrus_user_framebuffer_create(struct drm_device *dev,
 			       struct drm_file *filp,
-			       struct drm_mode_fb_cmd2 *mode_cmd)
+			       const struct drm_mode_fb_cmd2 *mode_cmd)
 {
 	struct drm_gem_object *obj;
 	struct cirrus_framebuffer *cirrus_fb;
@@ -90,6 +90,8 @@ static void cirrus_vram_fini(struct cirrus_device *cdev)
 	cdev->rmmio = NULL;
 	if (cdev->mc.vram_base)
 		release_mem_region(cdev->mc.vram_base, cdev->mc.vram_size);
+	if (cdev->cursor_iomem)
+		iounmap(cdev->cursor_iomem);
 }
 
 /* Map the framebuffer from the card and configure the core */
@@ -99,10 +101,22 @@ static int cirrus_vram_init(struct cirrus_device *cdev)
 	cdev->mc.vram_base = pci_resource_start(cdev->dev->pdev, 0);
 	/* We have 4MB of VRAM */
 	cdev->mc.vram_size = 4 * 1024 * 1024;
+	/* The last 16K of VRAM is for cursor */
+	cdev->cursor_ram_size = 16 * 1024;
 
 	if (!request_mem_region(cdev->mc.vram_base, cdev->mc.vram_size,
 				"cirrusdrmfb_vram")) {
 		DRM_ERROR("can't reserve VRAM\n");
+		return -ENXIO;
+	}
+
+	cdev->cursor_iomem = ioremap_nocache(cdev->mc.vram_base +
+					     cdev->mc.vram_size -
+					     cdev->cursor_ram_size,
+					     cdev->cursor_ram_size);
+	if (!cdev->cursor_iomem) {
+		release_mem_region(cdev->mc.vram_base, cdev->mc.vram_size);
+		DRM_ERROR("can't ioremap cursor VRAM\n");
 		return -ENXIO;
 	}
 

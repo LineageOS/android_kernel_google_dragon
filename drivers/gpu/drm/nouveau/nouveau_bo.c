@@ -138,10 +138,33 @@ nouveau_bo_del_ttm(struct ttm_buffer_object *bo)
 	struct nouveau_drm *drm = nouveau_bdev(bo->bdev);
 	struct drm_device *dev = drm->dev;
 	struct nouveau_bo *nvbo = nouveau_bo(bo);
+	struct nvkm_vma *vma;
 
 	if (unlikely(nvbo->gem.filp))
 		DRM_ERROR("bo %p still attached to GEM object\n", bo);
 	WARN_ON(nvbo->pin_refcnt > 0);
+
+	/*
+	 * Clean up any mappings that haven't been unmapped.  By the time
+	 * we get here, the gem refcount for the bo has necessarily dropped
+	 * to zero, which means we won't have any unmaps pending (since
+	 * nouveau_gem_object_unmap(), which schedules the deferred unmap,
+	 * grabs a gem reference and won't let it go until the deferred
+	 * unmap actually happens in gem_unmap_work().  So, any vmas that
+	 * are still in the list at this point are really leaked and can be
+	 * deleted safely.
+	 */
+	mutex_lock(&nvbo->vma_list_lock);
+	list_for_each_entry(vma, &nvbo->vma_list, head) {
+		DRM_INFO("Cleaning up leaked mapping offset 0x%llx\n",
+			 vma->offset);
+		if (vma->mapped)
+			nvkm_vm_unmap(vma);
+		nvkm_vm_put(vma);
+		kfree(vma);
+	}
+	mutex_unlock(&nvbo->vma_list_lock);
+
 	nv10_bo_put_tile_region(dev, nvbo->tile, NULL);
 	kfree(nvbo);
 }
@@ -212,6 +235,7 @@ nouveau_bo_new(struct drm_device *dev, int size, int align,
 	INIT_LIST_HEAD(&nvbo->head);
 	INIT_LIST_HEAD(&nvbo->entry);
 	INIT_LIST_HEAD(&nvbo->vma_list);
+	mutex_init(&nvbo->vma_list_lock);
 	nvbo->tile_mode = tile_mode;
 	nvbo->tile_flags = tile_flags;
 	nvbo->gpu_cacheable = !(flags & TTM_PL_FLAG_UNCACHED);
@@ -1107,12 +1131,12 @@ nouveau_bo_move_prep(struct nouveau_drm *drm, struct ttm_buffer_object *bo,
 	u64 size = (u64)mem->num_pages << PAGE_SHIFT;
 	int ret;
 
-	ret = nvkm_vm_get(drm->client.vm, size, old_node->page_shift,
+	ret = nvkm_vm_get(drm->client.vm, 0, size, old_node->page_shift,
 			  NV_MEM_ACCESS_RW, &old_node->vma[0]);
 	if (ret)
 		return ret;
 
-	ret = nvkm_vm_get(drm->client.vm, size, new_node->page_shift,
+	ret = nvkm_vm_get(drm->client.vm, 0, size, new_node->page_shift,
 			  NV_MEM_ACCESS_RW, &old_node->vma[1]);
 	if (ret) {
 		nvkm_vm_put(&old_node->vma[0]);
@@ -1314,6 +1338,8 @@ nouveau_bo_move_ntfy(struct ttm_buffer_object *bo, struct ttm_mem_reg *new_mem)
 	if (bo->destroy != nouveau_bo_del_ttm)
 		return;
 
+	mutex_lock(&nvbo->vma_list_lock);
+
 	list_for_each_entry(vma, &nvbo->vma_list, head) {
 		if (new_mem && new_mem->mem_type != TTM_PL_SYSTEM &&
 			      (new_mem->mem_type == TTM_PL_VRAM ||
@@ -1323,6 +1349,8 @@ nouveau_bo_move_ntfy(struct ttm_buffer_object *bo, struct ttm_mem_reg *new_mem)
 			nvkm_vm_unmap(vma);
 		}
 	}
+
+	mutex_unlock(&nvbo->vma_list_lock);
 }
 
 static int
@@ -1694,10 +1722,71 @@ struct nvkm_vma *
 nouveau_bo_vma_find(struct nouveau_bo *nvbo, struct nvkm_vm *vm)
 {
 	struct nvkm_vma *vma;
+
+	mutex_lock(&nvbo->vma_list_lock);
+
 	list_for_each_entry(vma, &nvbo->vma_list, head) {
-		if (vma->vm == vm)
+		if (vma->implicit &&
+		    (vma->vm == vm)) {
+			mutex_unlock(&nvbo->vma_list_lock);
 			return vma;
+		}
 	}
+
+	mutex_unlock(&nvbo->vma_list_lock);
+
+	return NULL;
+}
+
+struct nvkm_vma *
+nouveau_bo_subvma_find(struct nouveau_bo *nvbo, struct nvkm_vm *vm, u64 offset,
+		       u64 delta, u64 length)
+{
+	struct nvkm_vma *vma;
+
+	mutex_lock(&nvbo->vma_list_lock);
+
+	/*
+	 * Look for an existing subvma that we can reuse.  The delta and length
+	 * must match.  In addition, if a specific offset is given, that must
+	 * match as well (if offset is zero, then user doesn't care what the
+	 * assigned offset for this mapping is and we are okay to reuse the
+	 * mapping).
+	 */
+	list_for_each_entry(vma, &nvbo->vma_list, head)
+		if (!vma->implicit &&
+		    (vma->vm == vm) &&
+		    (vma->delta == delta) &&
+		    (vma->length == length) &&
+		    (!offset || (vma->offset == offset)) &&
+		    !vma->unmap_pending) {
+			mutex_unlock(&nvbo->vma_list_lock);
+			return vma;
+		}
+
+	mutex_unlock(&nvbo->vma_list_lock);
+
+	return NULL;
+}
+
+struct nvkm_vma *
+nouveau_bo_subvma_find_offset(struct nouveau_bo *nvbo, struct nvkm_vm *vm,
+			      u64 offset)
+{
+	struct nvkm_vma *vma;
+
+	mutex_lock(&nvbo->vma_list_lock);
+
+	list_for_each_entry(vma, &nvbo->vma_list, head)
+		if (!vma->implicit &&
+		    (vma->vm == vm) &&
+		    (vma->offset == offset) &&
+		    !vma->unmap_pending) {
+			mutex_unlock(&nvbo->vma_list_lock);
+			return vma;
+		}
+
+	mutex_unlock(&nvbo->vma_list_lock);
 
 	return NULL;
 }
@@ -1711,7 +1800,9 @@ nouveau_defer_vm_map(struct nvkm_vma *vma, struct nouveau_bo *nvbo)
 	mutex_lock(&vm->dirty_vma_lock);
 
 	list_for_each_entry(vma_entry, &vm->dirty_vma_list, entry)
-		if (vma_entry && vma_entry->bo == nvbo) {
+		if ((vma_entry && vma_entry->bo == nvbo) &&
+		    (vma_entry->vma->offset == vma->offset) &&
+		    (vma_entry->vma->delta == vma->delta)) {
 			mutex_unlock(&vm->dirty_vma_lock);
 			return;
 		}
@@ -1773,7 +1864,7 @@ nouveau_bo_vma_add_offset(struct nouveau_bo *nvbo, struct nvkm_vm *vm,
 	const u32 size = nvbo->bo.mem.num_pages << PAGE_SHIFT;
 	int ret;
 
-	ret = nvkm_vm_get_offset(vm, size, nvbo->page_shift,
+	ret = nvkm_vm_get_offset(vm, 0, size, nvbo->page_shift,
 				 NV_MEM_ACCESS_RW, vma, offset);
 	if (ret)
 		return ret;
@@ -1785,8 +1876,11 @@ nouveau_bo_vma_add_offset(struct nouveau_bo *nvbo, struct nvkm_vm *vm,
 			nvkm_vm_map(vma, nvbo->bo.mem.mm_node);
 	}
 
+	mutex_lock(&nvbo->vma_list_lock);
 	list_add_tail(&vma->head, &nvbo->vma_list);
+	mutex_unlock(&nvbo->vma_list_lock);
 	vma->refcount = 1;
+	vma->implicit = true;
 	return 0;
 }
 
@@ -1804,6 +1898,44 @@ nouveau_bo_vma_del(struct nouveau_bo *nvbo, struct nvkm_vma *vma)
 		if (vma->mapped && nvbo->bo.mem.mem_type != TTM_PL_SYSTEM)
 			nvkm_vm_unmap(vma);
 		nvkm_vm_put(vma);
+		mutex_lock(&nvbo->vma_list_lock);
 		list_del(&vma->head);
+		mutex_unlock(&nvbo->vma_list_lock);
 	}
+}
+
+int
+nouveau_bo_subvma_add(struct nouveau_bo *nvbo, struct nvkm_vm *vm,
+		      struct nvkm_vma *vma, u64 offset, u64 delta, u64 length,
+		      u32 memtype, bool lazy)
+{
+	int ret;
+
+	ret = nvkm_vm_get_offset(vm, delta, length, nvbo->page_shift,
+				 NV_MEM_ACCESS_RW, vma, offset);
+	if (ret)
+		return ret;
+
+	vma->delta = delta;
+	vma->length = length;
+	vma->memtype = memtype;
+
+	if (nouveau_bo_vma_mappable(nvbo, vma)) {
+		if (lazy)
+			nouveau_defer_vm_map(vma, nvbo);
+		else
+			nvkm_vm_map(vma, nvbo->bo.mem.mm_node);
+	}
+
+	mutex_lock(&nvbo->vma_list_lock);
+	list_add_tail(&vma->head, &nvbo->vma_list);
+	mutex_unlock(&nvbo->vma_list_lock);
+	vma->refcount = 1;
+	return 0;
+}
+
+void
+nouveau_bo_subvma_del(struct nouveau_bo *nvbo, struct nvkm_vma *vma)
+{
+	nouveau_bo_vma_del(nvbo, vma);
 }

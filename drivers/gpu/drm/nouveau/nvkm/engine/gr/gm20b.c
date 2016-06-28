@@ -42,7 +42,7 @@ gm20b_gr_init_gpc_mmu(struct gf100_gr_priv *priv)
 
 	/* TODO update once secure boot works */
 	val = nv_rd32(priv, 0x100c80);
-	val &= 0xf000087f;
+	val &= 0xf000187f;
 	nv_wr32(priv, 0x418880, val);
 	nv_wr32(priv, 0x418890, 0);
 	nv_wr32(priv, 0x418894, 0);
@@ -61,12 +61,33 @@ gm20b_gr_set_hww_esr_report_mask(struct gf100_gr_priv *priv)
 	nv_wr32(priv, 0x419e4c, 0x5);
 }
 
+int
+gm20b_gr_ctor(struct nvkm_object *parent, struct nvkm_object *engine,
+	      struct nvkm_oclass *oclass, void *data, u32 size,
+	      struct nvkm_object **pobject)
+{
+	int ret, i;
+	struct gf100_gr_priv *priv;
+
+	ret = gk20a_gr_ctor(parent, engine, oclass, data, size, pobject);
+	if (ret)
+		return ret;
+
+	priv = (void *)*pobject;
+	for (i = 0; i < 0x1000; i += 4) {
+		nv_wo32(priv->unk4188b4, i, 0x00000000);
+		nv_wo32(priv->unk4188b8, i, 0x00000000);
+	}
+
+	return 0;
+}
+
 struct nvkm_oclass *
 gm20b_gr_oclass = &(struct gk20a_gr_oclass) {
 	.gf100 = {
 		.base.handle = NV_ENGINE(GR, 0x2b),
 		.base.ofuncs = &(struct nvkm_ofuncs) {
-			.ctor = gk20a_gr_ctor,
+			.ctor = gm20b_gr_ctor,
 			.dtor = gf100_gr_dtor,
 			.init = gk20a_gr_init,
 			.fini = gk20a_gr_fini,

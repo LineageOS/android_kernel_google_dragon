@@ -63,6 +63,11 @@ static struct drm_driver driver;
 #define IVB_CURSOR_OFFSETS \
 	.cursor_offsets = { CURSOR_A_OFFSET, IVB_CURSOR_B_OFFSET, IVB_CURSOR_C_OFFSET }
 
+#define BDW_COLORS \
+	.color = { .degamma_lut_size = 512, .gamma_lut_size = 512 }
+#define CHV_COLORS \
+	.color = { .degamma_lut_size = 65, .gamma_lut_size = 257 }
+
 static const struct intel_device_info intel_i830_info = {
 	.gen = 2, .is_mobile = 1, .cursor_needs_physical = 1, .num_pipes = 2,
 	.has_overlay = 1, .overlay_needs_physical = 1,
@@ -307,6 +312,7 @@ static const struct intel_device_info intel_broadwell_d_info = {
 	.has_fbc = 1,
 	GEN_DEFAULT_PIPEOFFSETS,
 	IVB_CURSOR_OFFSETS,
+	BDW_COLORS,
 };
 
 static const struct intel_device_info intel_broadwell_m_info = {
@@ -319,6 +325,7 @@ static const struct intel_device_info intel_broadwell_m_info = {
 	.has_fbc = 1,
 	GEN_DEFAULT_PIPEOFFSETS,
 	IVB_CURSOR_OFFSETS,
+	BDW_COLORS,
 };
 
 static const struct intel_device_info intel_broadwell_gt3d_info = {
@@ -331,6 +338,7 @@ static const struct intel_device_info intel_broadwell_gt3d_info = {
 	.has_fbc = 1,
 	GEN_DEFAULT_PIPEOFFSETS,
 	IVB_CURSOR_OFFSETS,
+	BDW_COLORS,
 };
 
 static const struct intel_device_info intel_broadwell_gt3m_info = {
@@ -343,6 +351,7 @@ static const struct intel_device_info intel_broadwell_gt3m_info = {
 	.has_fbc = 1,
 	GEN_DEFAULT_PIPEOFFSETS,
 	IVB_CURSOR_OFFSETS,
+	BDW_COLORS,
 };
 
 static const struct intel_device_info intel_cherryview_info = {
@@ -353,6 +362,7 @@ static const struct intel_device_info intel_cherryview_info = {
 	.display_mmio_offset = VLV_DISPLAY_BASE,
 	GEN_CHV_PIPEOFFSETS,
 	CURSOR_OFFSETS,
+	CHV_COLORS,
 };
 
 static const struct intel_device_info intel_skylake_info = {
@@ -365,6 +375,7 @@ static const struct intel_device_info intel_skylake_info = {
 	.has_fbc = 1,
 	GEN_DEFAULT_PIPEOFFSETS,
 	IVB_CURSOR_OFFSETS,
+	BDW_COLORS,
 };
 
 static const struct intel_device_info intel_skylake_gt3_info = {
@@ -377,6 +388,7 @@ static const struct intel_device_info intel_skylake_gt3_info = {
 	.has_fbc = 1,
 	GEN_DEFAULT_PIPEOFFSETS,
 	IVB_CURSOR_OFFSETS,
+	BDW_COLORS,
 };
 
 static const struct intel_device_info intel_broxton_info = {
@@ -389,6 +401,7 @@ static const struct intel_device_info intel_broxton_info = {
 	.has_fbc = 1,
 	GEN_DEFAULT_PIPEOFFSETS,
 	IVB_CURSOR_OFFSETS,
+	BDW_COLORS,
 };
 
 /*
@@ -577,6 +590,8 @@ static int i915_drm_suspend(struct drm_device *dev)
 	dev_priv->modeset_restore = MODESET_SUSPENDED;
 	mutex_unlock(&dev_priv->modeset_restore_lock);
 
+	disable_rpm_wakeref_asserts(dev_priv);
+
 	/* We do a lot of poking in a lot of registers, make sure they work
 	 * properly. */
 	intel_display_set_init_power(dev_priv, true);
@@ -589,7 +604,7 @@ static int i915_drm_suspend(struct drm_device *dev)
 	if (error) {
 		dev_err(&dev->pdev->dev,
 			"GEM idle failed, resume might fail\n");
-		return error;
+		goto out;
 	}
 
 	intel_suspend_gt_powersave(dev);
@@ -630,7 +645,10 @@ static int i915_drm_suspend(struct drm_device *dev)
 	if (HAS_CSR(dev_priv))
 		flush_work(&dev_priv->csr.work);
 
-	return 0;
+out:
+	enable_rpm_wakeref_asserts(dev_priv);
+
+	return error;
 }
 
 static int i915_drm_suspend_late(struct drm_device *drm_dev, bool hibernation)
@@ -638,6 +656,8 @@ static int i915_drm_suspend_late(struct drm_device *drm_dev, bool hibernation)
 	struct drm_i915_private *dev_priv = drm_dev->dev_private;
 	bool fw_csr;
 	int ret;
+
+	disable_rpm_wakeref_asserts(dev_priv);
 
 	fw_csr = suspend_to_idle(dev_priv) && dev_priv->csr.dmc_payload;
 	/*
@@ -657,7 +677,7 @@ static int i915_drm_suspend_late(struct drm_device *drm_dev, bool hibernation)
 		if (!fw_csr)
 			intel_power_domains_init_hw(dev_priv, true);
 
-		return ret;
+		goto out;
 	}
 
 	pci_disable_device(drm_dev->pdev);
@@ -675,7 +695,10 @@ static int i915_drm_suspend_late(struct drm_device *drm_dev, bool hibernation)
 
 	dev_priv->suspended_to_idle = suspend_to_idle(dev_priv);
 
-	return 0;
+out:
+	enable_rpm_wakeref_asserts(dev_priv);
+
+	return ret;
 }
 
 int i915_suspend_legacy(struct drm_device *dev, pm_message_t state)
@@ -705,6 +728,8 @@ int i915_suspend_legacy(struct drm_device *dev, pm_message_t state)
 static int i915_drm_resume(struct drm_device *dev)
 {
 	struct drm_i915_private *dev_priv = dev->dev_private;
+
+	disable_rpm_wakeref_asserts(dev_priv);
 
 	mutex_lock(&dev->struct_mutex);
 	i915_gem_restore_gtt_mappings(dev);
@@ -768,6 +793,8 @@ static int i915_drm_resume(struct drm_device *dev)
 
 	drm_kms_helper_poll_enable(dev);
 
+	enable_rpm_wakeref_asserts(dev_priv);
+
 	return 0;
 }
 
@@ -792,6 +819,8 @@ static int i915_drm_resume_early(struct drm_device *dev)
 
 	pci_set_master(dev->pdev);
 
+	disable_rpm_wakeref_asserts(dev_priv);
+
 	if (IS_VALLEYVIEW(dev_priv))
 		ret = vlv_resume_prepare(dev_priv, false);
 	if (ret)
@@ -812,6 +841,8 @@ static int i915_drm_resume_early(struct drm_device *dev)
 
 out:
 	dev_priv->suspended_to_idle = false;
+
+	enable_rpm_wakeref_asserts(dev_priv);
 
 	return ret;
 }
@@ -1447,6 +1478,9 @@ static int intel_runtime_suspend(struct device *device)
 
 		return -EAGAIN;
 	}
+
+	disable_rpm_wakeref_asserts(dev_priv);
+
 	/*
 	 * We are safe here against re-faults, since the fault handler takes
 	 * an RPM reference.
@@ -1462,11 +1496,16 @@ static int intel_runtime_suspend(struct device *device)
 		DRM_ERROR("Runtime suspend failed, disabling it (%d)\n", ret);
 		intel_runtime_pm_enable_interrupts(dev_priv);
 
+		enable_rpm_wakeref_asserts(dev_priv);
+
 		return ret;
 	}
 
 	cancel_delayed_work_sync(&dev_priv->gpu_error.hangcheck_work);
 	intel_uncore_forcewake_reset(dev, false);
+
+	enable_rpm_wakeref_asserts(dev_priv);
+	WARN_ON_ONCE(atomic_read(&dev_priv->pm.wakeref_count));
 	dev_priv->pm.suspended = true;
 
 	/*
@@ -1510,6 +1549,9 @@ static int intel_runtime_resume(struct device *device)
 
 	DRM_DEBUG_KMS("Resuming device\n");
 
+	WARN_ON_ONCE(atomic_read(&dev_priv->pm.wakeref_count));
+	disable_rpm_wakeref_asserts(dev_priv);
+
 	intel_opregion_notify_adapter(dev, PCI_D0);
 	dev_priv->pm.suspended = false;
 
@@ -1531,7 +1573,18 @@ static int intel_runtime_resume(struct device *device)
 	gen6_update_ring_freq(dev);
 
 	intel_runtime_pm_enable_interrupts(dev_priv);
+
+	/*
+	 * On VLV/CHV display interrupts are part of the display
+	 * power well, so hpd is reinitialized from there. For
+	 * everyone else do it here.
+	 */
+	if (!IS_VALLEYVIEW(dev_priv))
+		intel_hpd_init(dev_priv);
+
 	intel_enable_gt_powersave(dev);
+
+	enable_rpm_wakeref_asserts(dev_priv);
 
 	if (ret)
 		DRM_ERROR("Runtime resume failed, disabling it (%d)\n", ret);

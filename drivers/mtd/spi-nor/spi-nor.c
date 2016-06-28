@@ -61,14 +61,20 @@ struct flash_info {
 	u16		addr_width;
 
 	u16		flags;
-#define	SECT_4K			0x01	/* SPINOR_OP_BE_4K works uniformly */
-#define	SPI_NOR_NO_ERASE	0x02	/* No erase command needed */
-#define	SST_WRITE		0x04	/* use SST byte programming */
-#define	SPI_NOR_NO_FR		0x08	/* Can't do fastread */
-#define	SECT_4K_PMC		0x10	/* SPINOR_OP_BE_4K_PMC works uniformly */
-#define	SPI_NOR_DUAL_READ	0x20    /* Flash supports Dual Read */
-#define	SPI_NOR_QUAD_READ	0x40    /* Flash supports Quad Read */
-#define	USE_FSR			0x80	/* use flag status register */
+#define SECT_4K			BIT(0)	/* SPINOR_OP_BE_4K works uniformly */
+#define SPI_NOR_NO_ERASE	BIT(1)	/* No erase command needed */
+#define SST_WRITE		BIT(2)	/* use SST byte programming */
+#define SPI_NOR_NO_FR		BIT(3)	/* Can't do fastread */
+#define SECT_4K_PMC		BIT(4)	/* SPINOR_OP_BE_4K_PMC works uniformly */
+#define SPI_NOR_DUAL_READ	BIT(5)	/* Flash supports Dual Read */
+#define SPI_NOR_QUAD_READ	BIT(6)	/* Flash supports Quad Read */
+#define USE_FSR			BIT(7)	/* use flag status register */
+#define SPI_NOR_HAS_LOCK	BIT(8)	/* Flash supports lock/unlock via SR */
+#define SPI_NOR_HAS_TB		BIT(9)	/*
+					 * Flash SR has Top/Bottom (TB) protect
+					 * bit. Must be used with
+					 * SPI_NOR_HAS_LOCK.
+					 */
 };
 
 #define JEDEC_MFR(info)	((info)->id[0])
@@ -410,16 +416,12 @@ static int spi_nor_erase(struct mtd_info *mtd, struct erase_info *instr)
 
 	write_disable(nor);
 
-	spi_nor_unlock_and_unprep(nor, SPI_NOR_OPS_ERASE);
-
-	instr->state = MTD_ERASE_DONE;
-	mtd_erase_callback(instr);
-
-	return ret;
-
 erase_err:
 	spi_nor_unlock_and_unprep(nor, SPI_NOR_OPS_ERASE);
-	instr->state = MTD_ERASE_FAILED;
+
+	instr->state = ret ? MTD_ERASE_FAILED : MTD_ERASE_DONE;
+	mtd_erase_callback(instr);
+
 	return ret;
 }
 
@@ -438,31 +440,57 @@ static void stm_get_locked_range(struct spi_nor *nor, u8 sr, loff_t *ofs,
 	} else {
 		pow = ((sr & mask) ^ mask) >> shift;
 		*len = mtd->size >> pow;
-		*ofs = mtd->size - *len;
+		if (nor->flags & SNOR_F_HAS_SR_TB && sr & SR_TB)
+			*ofs = 0;
+		else
+			*ofs = mtd->size - *len;
 	}
 }
 
 /*
- * Return 1 if the entire region is locked, 0 otherwise
+ * Return 1 if the entire region is locked (if @locked is true) or unlocked (if
+ * @locked is false); 0 otherwise
  */
-static int stm_is_locked_sr(struct spi_nor *nor, loff_t ofs, uint64_t len,
-			    u8 sr)
+static int stm_check_lock_status_sr(struct spi_nor *nor, loff_t ofs, uint64_t len,
+				    u8 sr, bool locked)
 {
 	loff_t lock_offs;
 	uint64_t lock_len;
 
+	if (!len)
+		return 1;
+
 	stm_get_locked_range(nor, sr, &lock_offs, &lock_len);
 
-	return (ofs + len <= lock_offs + lock_len) && (ofs >= lock_offs);
+	if (locked)
+		/* Requested range is a sub-range of locked range */
+		return (ofs + len <= lock_offs + lock_len) && (ofs >= lock_offs);
+	else
+		/* Requested range does not overlap with locked range */
+		return (ofs >= lock_offs + lock_len) || (ofs + len <= lock_offs);
+}
+
+static int stm_is_locked_sr(struct spi_nor *nor, loff_t ofs, uint64_t len,
+			    u8 sr)
+{
+	return stm_check_lock_status_sr(nor, ofs, len, sr, true);
+}
+
+static int stm_is_unlocked_sr(struct spi_nor *nor, loff_t ofs, uint64_t len,
+			      u8 sr)
+{
+	return stm_check_lock_status_sr(nor, ofs, len, sr, false);
 }
 
 /*
  * Lock a region of the flash. Compatible with ST Micro and similar flash.
- * Supports only the block protection bits BP{0,1,2} in the status register
+ * Supports the block protection bits BP{0,1,2} in the status register
  * (SR). Does not support these features found in newer SR bitfields:
- *   - TB: top/bottom protect - only handle TB=0 (top protect)
  *   - SEC: sector/block protect - only handle SEC=0 (block protect)
  *   - CMP: complement protect - only support CMP=0 (range is not complemented)
+ *
+ * Support for the following is provided conditionally for some flash:
+ *   - TB: top/bottom protect
  *
  * Sample table portion for 8MB flash (Winbond w25q64fw):
  *
@@ -476,26 +504,55 @@ static int stm_is_locked_sr(struct spi_nor *nor, loff_t ofs, uint64_t len,
  *    0   |   0   |   1   |   0   |   1   |  2 MB         | Upper 1/4
  *    0   |   0   |   1   |   1   |   0   |  4 MB         | Upper 1/2
  *    X   |   X   |   1   |   1   |   1   |  8 MB         | ALL
+ *  ------|-------|-------|-------|-------|---------------|-------------------
+ *    0   |   1   |   0   |   0   |   1   |  128 KB       | Lower 1/64
+ *    0   |   1   |   0   |   1   |   0   |  256 KB       | Lower 1/32
+ *    0   |   1   |   0   |   1   |   1   |  512 KB       | Lower 1/16
+ *    0   |   1   |   1   |   0   |   0   |  1 MB         | Lower 1/8
+ *    0   |   1   |   1   |   0   |   1   |  2 MB         | Lower 1/4
+ *    0   |   1   |   1   |   1   |   0   |  4 MB         | Lower 1/2
  *
  * Returns negative on errors, 0 on success.
  */
 static int stm_lock(struct spi_nor *nor, loff_t ofs, uint64_t len)
 {
 	struct mtd_info *mtd = &nor->mtd;
-	u8 status_old, status_new;
+	int status_old, status_new;
 	u8 mask = SR_BP2 | SR_BP1 | SR_BP0;
 	u8 shift = ffs(mask) - 1, pow, val;
+	loff_t lock_len;
+	bool can_be_top = true, can_be_bottom = nor->flags & SNOR_F_HAS_SR_TB;
+	bool use_top;
+	int ret;
 
 	status_old = read_sr(nor);
+	if (status_old < 0)
+		return status_old;
 
-	/* SPI NOR always locks to the end */
-	if (ofs + len != mtd->size) {
-		/* Does combined region extend to end? */
-		if (!stm_is_locked_sr(nor, ofs + len, mtd->size - ofs - len,
-				      status_old))
-			return -EINVAL;
-		len = mtd->size - ofs;
-	}
+	/* If nothing in our range is unlocked, we don't need to do anything */
+	if (stm_is_locked_sr(nor, ofs, len, status_old))
+		return 0;
+
+	/* If anything below us is unlocked, we can't use 'bottom' protection */
+	if (!stm_is_locked_sr(nor, 0, ofs, status_old))
+		can_be_bottom = false;
+
+	/* If anything above us is unlocked, we can't use 'top' protection */
+	if (!stm_is_locked_sr(nor, ofs + len, mtd->size - (ofs + len),
+				status_old))
+		can_be_top = false;
+
+	if (!can_be_bottom && !can_be_top)
+		return -EINVAL;
+
+	/* Prefer top, if both are valid */
+	use_top = can_be_top;
+
+	/* lock_len: length of region that should end up locked */
+	if (use_top)
+		lock_len = mtd->size - ofs;
+	else
+		lock_len = ofs + len;
 
 	/*
 	 * Need smallest pow such that:
@@ -506,7 +563,7 @@ static int stm_lock(struct spi_nor *nor, loff_t ofs, uint64_t len)
 	 *
 	 *   pow = ceil(log2(size / len)) = log2(size) - floor(log2(len))
 	 */
-	pow = ilog2(mtd->size) - ilog2(len);
+	pow = ilog2(mtd->size) - ilog2(lock_len);
 	val = mask - (pow << shift);
 	if (val & ~mask)
 		return -EINVAL;
@@ -514,14 +571,27 @@ static int stm_lock(struct spi_nor *nor, loff_t ofs, uint64_t len)
 	if (!(val & mask))
 		return -EINVAL;
 
-	status_new = (status_old & ~mask) | val;
+	status_new = (status_old & ~mask & ~SR_TB) | val;
+
+	/* Disallow further writes if WP pin is asserted */
+	status_new |= SR_SRWD;
+
+	if (!use_top)
+		status_new |= SR_TB;
+
+	/* Don't bother if they're the same */
+	if (status_new == status_old)
+		return 0;
 
 	/* Only modify protection if it will not unlock other areas */
-	if ((status_new & mask) <= (status_old & mask))
+	if ((status_new & mask) < (status_old & mask))
 		return -EINVAL;
 
 	write_enable(nor);
-	return write_sr(nor, status_new);
+	ret = write_sr(nor, status_new);
+	if (ret)
+		return ret;
+	return spi_nor_wait_till_ready(nor);
 }
 
 /*
@@ -532,16 +602,42 @@ static int stm_lock(struct spi_nor *nor, loff_t ofs, uint64_t len)
 static int stm_unlock(struct spi_nor *nor, loff_t ofs, uint64_t len)
 {
 	struct mtd_info *mtd = &nor->mtd;
-	uint8_t status_old, status_new;
+	int status_old, status_new;
 	u8 mask = SR_BP2 | SR_BP1 | SR_BP0;
 	u8 shift = ffs(mask) - 1, pow, val;
+	loff_t lock_len;
+	bool can_be_top = true, can_be_bottom = nor->flags & SNOR_F_HAS_SR_TB;
+	bool use_top;
+	int ret;
 
 	status_old = read_sr(nor);
+	if (status_old < 0)
+		return status_old;
 
-	/* Cannot unlock; would unlock larger region than requested */
-	if (stm_is_locked_sr(nor, status_old, ofs - mtd->erasesize,
-			     mtd->erasesize))
+	/* If nothing in our range is locked, we don't need to do anything */
+	if (stm_is_unlocked_sr(nor, ofs, len, status_old))
+		return 0;
+
+	/* If anything below us is locked, we can't use 'top' protection */
+	if (!stm_is_unlocked_sr(nor, 0, ofs, status_old))
+		can_be_top = false;
+
+	/* If anything above us is locked, we can't use 'bottom' protection */
+	if (!stm_is_unlocked_sr(nor, ofs + len, mtd->size - (ofs + len),
+				status_old))
+		can_be_bottom = false;
+
+	if (!can_be_bottom && !can_be_top)
 		return -EINVAL;
+
+	/* Prefer top, if both are valid */
+	use_top = can_be_top;
+
+	/* lock_len: length of region that should remain locked */
+	if (use_top)
+		lock_len = mtd->size - (ofs + len);
+	else
+		lock_len = ofs;
 
 	/*
 	 * Need largest pow such that:
@@ -552,8 +648,8 @@ static int stm_unlock(struct spi_nor *nor, loff_t ofs, uint64_t len)
 	 *
 	 *   pow = floor(log2(size / len)) = log2(size) - ceil(log2(len))
 	 */
-	pow = ilog2(mtd->size) - order_base_2(mtd->size - (ofs + len));
-	if (ofs + len == mtd->size) {
+	pow = ilog2(mtd->size) - order_base_2(lock_len);
+	if (lock_len == 0) {
 		val = 0; /* fully unlocked */
 	} else {
 		val = mask - (pow << shift);
@@ -562,14 +658,28 @@ static int stm_unlock(struct spi_nor *nor, loff_t ofs, uint64_t len)
 			return -EINVAL;
 	}
 
-	status_new = (status_old & ~mask) | val;
+	status_new = (status_old & ~mask & ~SR_TB) | val;
+
+	/* Don't protect status register if we're fully unlocked */
+	if (lock_len == mtd->size)
+		status_new &= ~SR_SRWD;
+
+	if (!use_top)
+		status_new |= SR_TB;
+
+	/* Don't bother if they're the same */
+	if (status_new == status_old)
+		return 0;
 
 	/* Only modify protection if it will not lock other areas */
-	if ((status_new & mask) >= (status_old & mask))
+	if ((status_new & mask) > (status_old & mask))
 		return -EINVAL;
 
 	write_enable(nor);
-	return write_sr(nor, status_new);
+	ret = write_sr(nor, status_new);
+	if (ret)
+		return ret;
+	return spi_nor_wait_till_ready(nor);
 }
 
 /*
@@ -849,12 +959,24 @@ static const struct flash_info spi_nor_ids[] = {
 	{ "w25x16", INFO(0xef3015, 0, 64 * 1024,  32, SECT_4K) },
 	{ "w25x32", INFO(0xef3016, 0, 64 * 1024,  64, SECT_4K) },
 	{ "w25q32", INFO(0xef4016, 0, 64 * 1024,  64, SECT_4K) },
-	{ "w25q32dw", INFO(0xef6016, 0, 64 * 1024,  64, SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ) },
+	{
+		"w25q32dw", INFO(0xef6016, 0, 64 * 1024,  64,
+			SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ |
+			SPI_NOR_HAS_LOCK | SPI_NOR_HAS_TB)
+	},
 	{ "w25x64", INFO(0xef3017, 0, 64 * 1024, 128, SECT_4K) },
 	{ "w25q64", INFO(0xef4017, 0, 64 * 1024, 128, SECT_4K) },
-	{ "w25q64dw", INFO(0xef6017, 0, 64 * 1024, 128, SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ) },
+	{
+		"w25q64dw", INFO(0xef6017, 0, 64 * 1024, 128,
+			SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ |
+			SPI_NOR_HAS_LOCK | SPI_NOR_HAS_TB)
+	},
 	{ "w25q64fw", INFO(0xef6017, 0, 64 * 1024, 128, SECT_4K) },
-	{ "w25q128fw", INFO(0xef6018, 0, 64 * 1024, 256, SECT_4K) },
+	{
+		"w25q128fw", INFO(0xef6018, 0, 64 * 1024, 256,
+			SECT_4K | SPI_NOR_DUAL_READ | SPI_NOR_QUAD_READ |
+			SPI_NOR_HAS_LOCK | SPI_NOR_HAS_TB)
+	},
 	{ "w25q80", INFO(0xef5014, 0, 64 * 1024,  16, SECT_4K) },
 	{ "w25q80bl", INFO(0xef4014, 0, 64 * 1024,  16, SECT_4K) },
 	{ "w25q128", INFO(0xef4018, 0, 64 * 1024, 256, SECT_4K) },
@@ -888,7 +1010,7 @@ static const struct flash_info *spi_nor_read_id(struct spi_nor *nor)
 				return &spi_nor_ids[tmp];
 		}
 	}
-	dev_err(nor->dev, "unrecognized JEDEC id bytes: %02x, %2x, %2x\n",
+	dev_err(nor->dev, "unrecognized JEDEC id bytes: %02x, %02x, %02x\n",
 		id[0], id[1], id[2]);
 	return ERR_PTR(-ENODEV);
 }
@@ -1034,6 +1156,8 @@ static int macronix_quad_enable(struct spi_nor *nor)
 	int ret, val;
 
 	val = read_sr(nor);
+	if (val < 0)
+		return val;
 	write_enable(nor);
 
 	write_sr(nor, val | SR_QUAD_EN_MX);
@@ -1222,9 +1346,10 @@ int spi_nor_scan(struct spi_nor *nor, const char *name, enum read_mode mode)
 	if (JEDEC_MFR(info) == SNOR_MFR_ATMEL ||
 	    JEDEC_MFR(info) == SNOR_MFR_INTEL ||
 	    JEDEC_MFR(info) == SNOR_MFR_SST ||
-	    JEDEC_MFR(info) == SNOR_MFR_WINBOND) {
+	    info->flags & SPI_NOR_HAS_LOCK) {
 		write_enable(nor);
 		write_sr(nor, 0);
+		spi_nor_wait_till_ready(nor);
 	}
 
 	if (!mtd->name)
@@ -1239,7 +1364,7 @@ int spi_nor_scan(struct spi_nor *nor, const char *name, enum read_mode mode)
 
 	/* NOR protection support for STmicro/Micron chips and similar */
 	if (JEDEC_MFR(info) == SNOR_MFR_MICRON ||
-	    JEDEC_MFR(info) == SNOR_MFR_WINBOND) {
+			info->flags & SPI_NOR_HAS_LOCK) {
 		nor->flash_lock = stm_lock;
 		nor->flash_unlock = stm_unlock;
 		nor->flash_is_locked = stm_is_locked;
@@ -1259,6 +1384,8 @@ int spi_nor_scan(struct spi_nor *nor, const char *name, enum read_mode mode)
 
 	if (info->flags & USE_FSR)
 		nor->flags |= SNOR_F_USE_FSR;
+	if (info->flags & SPI_NOR_HAS_TB)
+		nor->flags |= SNOR_F_HAS_SR_TB;
 
 #ifdef CONFIG_MTD_SPI_NOR_USE_4K_SECTORS
 	/* prefer "small sector" erase if possible */

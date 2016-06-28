@@ -70,6 +70,14 @@ static inline u16 u16_field_get(const u8 *preq_elem, int offset, bool ae)
 #define MSEC_TO_TU(x) (x*1000/1024)
 #define SN_GT(x, y) ((s32)(y - x) < 0)
 #define SN_LT(x, y) ((s32)(x - y) < 0)
+#define MAX_SANE_SN_DELTA 32
+#define MP_DIFF(a,b) (((a) > (b)) ? ((a)-(b)) : ((b)-(a)))
+#define LOG_PERCENT_DIFF 30
+
+static inline u32 SN_DELTA(u32 x, u32 y)
+{
+	return x >= y ? x - y : y - x;
+}
 
 #define net_traversal_jiffies(s) \
 	msecs_to_jiffies(s->u.mesh.mshcfg.dot11MeshHWMPnetDiameterTraversalTime)
@@ -290,11 +298,13 @@ int mesh_path_error_tx(struct ieee80211_sub_if_data *sdata,
 }
 
 void ieee80211s_update_metric(struct ieee80211_local *local,
-		struct sta_info *sta, struct sk_buff *skb)
+		struct sta_info *sta, struct sk_buff *skb, int retry_count)
 {
 	struct ieee80211_tx_info *txinfo = IEEE80211_SKB_CB(skb);
 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *) skb->data;
-	int failed;
+	int failed, rate;
+	struct rate_info rinfo;
+	u8 weight = sta->sdata->u.mesh.bitrate_avg_weight;
 
 	if (!ieee80211_is_data(hdr->frame_control))
 		return;
@@ -303,37 +313,91 @@ void ieee80211s_update_metric(struct ieee80211_local *local,
 
 	/* moving average, scaled to 100 */
 	sta->mesh->fail_avg =
-		((80 * sta->mesh->fail_avg + 5) / 100 + 20 * failed);
+		((80 * sta->mesh->fail_avg + 5) / 100 +
+		 20 * (retry_count + failed) / (retry_count + 1));
 	if (sta->mesh->fail_avg > 95)
 		mesh_plink_broken(sta);
+
+	/* bitrate moving average, scaled to 100x, in units of 1Kbps */
+	sta_set_rate_info_tx(sta, &sta->last_tx_rate, &rinfo);
+	rate = cfg80211_calculate_bitrate(&rinfo);
+	sta->mesh->bitrate_avg = (((100 - weight) * sta->mesh->bitrate_avg + 5)
+			/ 100 + weight * rate);
 }
 
-static u32 airtime_link_metric_get(struct ieee80211_local *local,
+u32 airtime_link_metric_get(struct ieee80211_local *local,
 				   struct sta_info *sta)
 {
-	struct rate_info rinfo;
 	/* This should be adjusted for each device */
 	int device_constant = 1 << ARITH_SHIFT;
 	int test_frame_len = TEST_FRAME_LEN << ARITH_SHIFT;
 	int s_unit = 1 << ARITH_SHIFT;
-	int rate, err;
+	int err;
 	u32 tx_time, estimated_retx;
 	u64 result;
+	u32 bitrate_avg;
+	struct rate_info rinfo;
 
 	if (sta->mesh->fail_avg >= 100)
 		return MAX_METRIC;
 
-	sta_set_rate_info_tx(sta, &sta->last_tx_rate, &rinfo);
-	rate = cfg80211_calculate_bitrate(&rinfo);
-	if (WARN_ON(!rate))
-		return MAX_METRIC;
+	if (!sta->mesh->bitrate_avg) {
+		sta_set_rate_info_tx(sta, &sta->last_tx_rate, &rinfo);
+		sta->mesh->bitrate_avg = cfg80211_calculate_bitrate(&rinfo);
+		if (WARN_ON(!sta->mesh->bitrate_avg))
+			return MAX_METRIC;
+	}
 
+	bitrate_avg = sta->mesh->bitrate_avg;
 	err = (sta->mesh->fail_avg << ARITH_SHIFT) / 100;
 
-	/* bitrate is in units of 100 Kbps, while we need rate in units of
+#ifdef CONFIG_MAC80211_DEBUGFS
+/* signal strength in db below witch the rate remains at 6Mbps */
+#define MIN_SIGNAL_STRENGTH -99
+#define MIN_BIT_RATE  6000 /* Lowest rate in Kbps */
+/* signal strength below which rates start dropping exponentially */
+#define RATE_DROP_DB_THRESHOLD  -40
+/*
+ * Approximate signal strength change in db that results
+ * in rate to drop by half.
+ */
+#define DB_DEGRADE_TO_HALF_RATE  6
+	/*
+	 * Degrade rate with the following rules.
+	 * - Force the rate to 6Mbps if resulting signal strengh is below
+	 *   MIN_SIGNAL_STRENGTH.
+	 * - Rate remains same until RATE_DROP_DB_THRESHOLD and drops by
+	 *   half for every HALF_RATE_DB_DELTA db drop there after.
+	 */
+	if (sta->link_degrade_db) {
+		int avg_signal;
+		/* the average signal strength is stored as a +ve value */
+		avg_signal = (s8) -ewma_read(&sta->avg_signal);
+		if (avg_signal > MIN_SIGNAL_STRENGTH && bitrate_avg > MIN_BIT_RATE) {
+			if ((avg_signal - (int)sta->link_degrade_db) < MIN_SIGNAL_STRENGTH) {
+				bitrate_avg = MIN_BIT_RATE;
+			} else {
+				int db_change=0;
+				if ((avg_signal - sta->link_degrade_db) < RATE_DROP_DB_THRESHOLD) {
+					/*
+					 * Degraded signal falls below RATE_DROP_DB_THRESHOLD,
+					 * calculate delta from RATE_DROP_DB_THRESHOLD to the
+					 * resulting signal strength.
+					 */
+					db_change =  RATE_DROP_DB_THRESHOLD -
+						(avg_signal - sta->link_degrade_db);
+				}
+				bitrate_avg =  MIN_BIT_RATE +
+					((bitrate_avg - MIN_BIT_RATE) >>
+					 (db_change/DB_DEGRADE_TO_HALF_RATE));
+			}
+		}
+	}
+#endif
+	/* bitrate is in units of 1 Kbps, while we need rate in units of
 	 * 1Mbps. This will be corrected on tx_time computation.
 	 */
-	tx_time = (device_constant + 10 * test_frame_len / rate);
+	tx_time = (device_constant + 1000 * test_frame_len / bitrate_avg);
 	estimated_retx = ((1 << (2 * ARITH_SHIFT)) / (s_unit - err));
 	result = (tx_time * estimated_retx) >> (2 * ARITH_SHIFT) ;
 	return (u32)result;
@@ -369,6 +433,8 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 	unsigned long orig_lifetime, exp_time;
 	u32 last_hop_metric, new_metric;
 	bool process = true;
+	bool mpath_table_updated = 0;
+	u8 hopcount;
 
 	rcu_read_lock();
 	sta = sta_info_get(sdata, mgmt->sa);
@@ -387,6 +453,7 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 		orig_sn = PREQ_IE_ORIG_SN(hwmp_ie);
 		orig_lifetime = PREQ_IE_LIFETIME(hwmp_ie);
 		orig_metric = PREQ_IE_METRIC(hwmp_ie);
+		hopcount = PREQ_IE_HOPCOUNT(hwmp_ie) + 1;
 		break;
 	case MPATH_PREP:
 		/* Originator here refers to the MP that was the target in the
@@ -398,6 +465,7 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 		orig_sn = PREP_IE_TARGET_SN(hwmp_ie);
 		orig_lifetime = PREP_IE_LIFETIME(hwmp_ie);
 		orig_metric = PREP_IE_METRIC(hwmp_ie);
+		hopcount = PREP_IE_HOPCOUNT(hwmp_ie) + 1;
 		break;
 	default:
 		rcu_read_unlock();
@@ -422,9 +490,37 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 				fresh_info = false;
 			else if ((mpath->flags & MESH_PATH_ACTIVE) &&
 			    (mpath->flags & MESH_PATH_SN_VALID)) {
+				/*
+				 * - throw away older SN
+				 * - if nexthop stays the same (no path change),
+				 *   always update
+				 * - else, the new path needs to be path_switch_threshold %
+				 *   better than the current path
+				 */
 				if (SN_GT(mpath->sn, orig_sn) ||
-				    (mpath->sn == orig_sn &&
-				     new_metric >= mpath->metric)) {
+				    (rcu_access_pointer(mpath->next_hop) != sta &&
+					(new_metric * (100 + sdata->u.mesh.path_switch_threshold)
+						>= mpath->metric * 100))) {
+					process = false;
+					fresh_info = false;
+				}
+			} else if (!(mpath->flags & MESH_PATH_ACTIVE)) {
+				bool have_sn, newer_sn, bounced;
+
+				have_sn = mpath->flags & MESH_PATH_SN_VALID;
+				newer_sn = have_sn && SN_GT(orig_sn, mpath->sn);
+				bounced = have_sn &&
+					  (SN_DELTA(orig_sn, mpath->sn) >
+							MAX_SANE_SN_DELTA);
+
+				if (!have_sn || newer_sn) {
+					/* if SN is newer than what we had
+					 * then we can take it */;
+				} else if (bounced) {
+					/* if SN is way different than what
+					 * we had then assume the other side
+					 * rebooted or restarted */;
+				} else {
 					process = false;
 					fresh_info = false;
 				}
@@ -437,14 +533,25 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 			}
 			spin_lock_bh(&mpath->state_lock);
 		}
-
 		if (fresh_info) {
+			if (sta != rcu_access_pointer(mpath->next_hop)) {
+				mpath_dbg(sdata,
+						  "MESH MPU dst %pM next hop %pM metric %d ft 0x%x\n",
+						  mpath->dst,sta->addr, new_metric,action );
+				mpath->pstats.path_change_count++;
+				mpath_table_updated=1;
+			} else if (MP_DIFF(new_metric,mpath->metric) > (mpath->metric*LOG_PERCENT_DIFF)/100)  {
+				mpath_dbg(sdata,
+						  "MESH MPLMU DIRECT dst %pM next hop %pM metric from %d to %d ft 0x%x\n",
+						  mpath->dst,sta->addr,mpath->metric,new_metric,action );
+			}
 			mesh_path_assign_nexthop(mpath, sta);
 			mpath->flags |= MESH_PATH_SN_VALID;
 			mpath->metric = new_metric;
 			mpath->sn = orig_sn;
 			mpath->exp_time = time_after(mpath->exp_time, exp_time)
 					  ?  mpath->exp_time : exp_time;
+			mpath->hop_count = hopcount;
 			mesh_path_activate(mpath);
 			spin_unlock_bh(&mpath->state_lock);
 			mesh_path_tx_pending(mpath);
@@ -467,7 +574,10 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 			spin_lock_bh(&mpath->state_lock);
 			if ((mpath->flags & MESH_PATH_FIXED) ||
 				((mpath->flags & MESH_PATH_ACTIVE) &&
-					(last_hop_metric > mpath->metric)))
+					rcu_access_pointer(mpath->next_hop) != sta &&
+					(last_hop_metric * (100 +
+					sdata->u.mesh.path_switch_threshold) >
+					mpath->metric * 100)))
 				fresh_info = false;
 		} else {
 			mpath = mesh_path_add(sdata, ta);
@@ -479,10 +589,22 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 		}
 
 		if (fresh_info) {
+			if (sta != rcu_access_pointer(mpath->next_hop)) {
+				mpath_dbg(sdata,
+						  "MESH MPU DIRECT dst %pM next hop %pM metric %d ft 0x%x\n",
+						  mpath->dst,sta->addr,last_hop_metric,action );
+				mpath->pstats.path_change_count++;
+				mpath_table_updated=1;
+			} else if (MP_DIFF(last_hop_metric,mpath->metric) > (mpath->metric*LOG_PERCENT_DIFF)/100)  {
+				mpath_dbg(sdata,
+						  "MESH MPLMU DIRECT dst %pM next hop %pM metric from %d to %d ft 0x%x\n",
+						  mpath->dst,sta->addr,mpath->metric,last_hop_metric,action );
+			}
 			mesh_path_assign_nexthop(mpath, sta);
 			mpath->metric = last_hop_metric;
 			mpath->exp_time = time_after(mpath->exp_time, exp_time)
 					  ?  mpath->exp_time : exp_time;
+			mpath->hop_count = 1;
 			mesh_path_activate(mpath);
 			spin_unlock_bh(&mpath->state_lock);
 			mesh_path_tx_pending(mpath);
@@ -491,7 +613,11 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 	}
 
 	rcu_read_unlock();
-
+	if (mpath_table_updated) {
+		mesh_path_table_debug_dump(sdata);
+		cfg80211_new_mpath(sdata->dev, mpath->dst, sta->addr,
+				   GFP_KERNEL);
+	}
 	return process ? new_metric : 0;
 }
 
@@ -1119,8 +1245,20 @@ int mesh_nexthop_lookup(struct ieee80211_sub_if_data *sdata,
 	rcu_read_lock();
 	mpath = mesh_path_lookup(sdata, target_addr);
 
-	if (!mpath || !(mpath->flags & MESH_PATH_ACTIVE))
+	if (!mpath || !(mpath->flags & MESH_PATH_ACTIVE)) {
+#ifdef MESH_BYPASS_ROUTING_FOR_TEST_FRAMES
+		/* Allow injected packets to bypass mesh routing -
+		 * The assumption is that these packets have
+		 * DA (addr3) is 0. the actual destination is set to addr1
+		 * already in tx.c. copy it to addr3.
+		 */
+		if (is_zero_ether_addr(target_addr)) {
+			memcpy(hdr->addr3, hdr->addr1, ETH_ALEN);
+			err = 0;
+		}
+#endif
 		goto endlookup;
+	}
 
 	if (time_after(jiffies,
 		       mpath->exp_time -

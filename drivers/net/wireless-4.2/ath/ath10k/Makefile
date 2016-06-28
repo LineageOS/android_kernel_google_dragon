@@ -11,7 +11,8 @@ ath10k_core-y += mac.o \
 		 wmi-tlv.o \
 		 bmi.o \
 		 hw.o \
-		 p2p.o
+		 p2p.o \
+		 swap.o
 
 ath10k_core-$(CONFIG_ATH10K_DEBUGFS) += spectral.o
 ath10k_core-$(CONFIG_NL80211_TESTMODE) += testmode.o
@@ -23,6 +24,8 @@ ath10k_core-$(CONFIG_PM) += wow.o
 obj-$(CONFIG_ATH10K_PCI) += ath10k_pci.o
 ath10k_pci-y += pci.o \
 		ce.o
+
+ath10k_pci-$(CONFIG_ATH10K_AHB) += ahb.o
 
 # for tracing framework to find trace.h
 CFLAGS_trace.o := -I$(src)

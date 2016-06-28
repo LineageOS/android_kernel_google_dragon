@@ -13,9 +13,10 @@
  */
 #include <linux/clk.h>
 #include <linux/component.h>
+#include <linux/device.h>
 #include <linux/err.h>
 #include <linux/io.h>
-#include <linux/of_address.h>
+#include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -90,6 +91,7 @@ int mtk_smi_larb_get(struct device *larbdev)
 
 	return 0;
 }
+EXPORT_SYMBOL_GPL(mtk_smi_larb_get);
 
 void mtk_smi_larb_put(struct device *larbdev)
 {
@@ -105,6 +107,7 @@ void mtk_smi_larb_put(struct device *larbdev)
 	mtk_smi_disable(&larb->smi);
 	mtk_smi_disable(common);
 }
+EXPORT_SYMBOL_GPL(mtk_smi_larb_put);
 
 static int
 mtk_smi_larb_bind(struct device *dev, struct device *master, void *data)

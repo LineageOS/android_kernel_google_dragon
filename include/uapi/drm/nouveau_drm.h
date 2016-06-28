@@ -151,7 +151,8 @@ struct drm_nouveau_gem_cpu_fini {
 struct drm_nouveau_gem_as_alloc {
 	uint64_t pages;     /* in, page length */
 	uint32_t page_size; /* in, byte page size */
-	uint32_t pad;
+#define NOUVEAU_GEM_AS_SPARSE 0x1
+	uint32_t flags;
 	uint64_t align; /* in, requested alignment in bytes */
 	uint64_t address; /* in/out, non-zero for fixed address allocation */
 };
@@ -168,6 +169,24 @@ struct drm_nouveau_gem_set_error_notifier {
 	uint32_t channel;
 	uint32_t buffer;
 	uint32_t offset; /* bytes, u32-aligned */
+};
+
+struct drm_nouveau_gem_map {
+	uint32_t handle;
+	uint32_t domain;
+	uint64_t offset;
+	uint64_t delta;
+	uint64_t length;
+	uint32_t tile_mode;
+	uint32_t tile_flags;
+};
+
+struct drm_nouveau_gem_unmap {
+	uint32_t handle;
+	uint32_t pad;
+	uint64_t offset;
+	uint64_t delta;
+	uint64_t length;
 };
 
 #define DRM_NOUVEAU_GETPARAM           0x00 /* deprecated */
@@ -194,6 +213,8 @@ struct drm_nouveau_gem_set_error_notifier {
 #define DRM_NOUVEAU_GEM_AS_ALLOC       (DRM_NOUVEAU_STAGING_IOCTL + 0x3)
 #define DRM_NOUVEAU_GEM_AS_FREE        (DRM_NOUVEAU_STAGING_IOCTL + 0x4)
 #define DRM_NOUVEAU_GEM_SET_ERROR_NOTIFIER (DRM_NOUVEAU_STAGING_IOCTL + 0x5)
+#define DRM_NOUVEAU_GEM_MAP            (DRM_NOUVEAU_STAGING_IOCTL + 0x6)
+#define DRM_NOUVEAU_GEM_UNMAP          (DRM_NOUVEAU_STAGING_IOCTL + 0x7)
 
 #define DRM_IOCTL_NOUVEAU_GEM_NEW            DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_GEM_NEW, struct drm_nouveau_gem_new)
 #define DRM_IOCTL_NOUVEAU_GEM_PUSHBUF        DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_GEM_PUSHBUF, struct drm_nouveau_gem_pushbuf)
@@ -206,5 +227,7 @@ struct drm_nouveau_gem_set_error_notifier {
 #define DRM_IOCTL_NOUVEAU_GEM_AS_ALLOC       DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_GEM_AS_ALLOC, struct drm_nouveau_gem_as_alloc)
 #define DRM_IOCTL_NOUVEAU_GEM_AS_FREE        DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_GEM_AS_FREE, struct drm_nouveau_gem_as_free)
 #define DRM_IOCTL_NOUVEAU_GEM_SET_ERROR_NOTIFIER DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_GEM_SET_ERROR_NOTIFIER, struct drm_nouveau_gem_set_error_notifier)
+#define DRM_IOCTL_NOUVEAU_GEM_MAP            DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_GEM_MAP, struct drm_nouveau_gem_map)
+#define DRM_IOCTL_NOUVEAU_GEM_UNMAP          DRM_IOWR(DRM_COMMAND_BASE + DRM_NOUVEAU_GEM_UNMAP, struct drm_nouveau_gem_unmap)
 
 #endif /* __NOUVEAU_DRM_H__ */

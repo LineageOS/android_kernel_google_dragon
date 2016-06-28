@@ -286,7 +286,7 @@ nouveau_accel_init(struct nouveau_drm *drm)
 		}
 	}
 
-	drm->gem_unmap_wq = alloc_ordered_workqueue("nouveau-gem-unmap", 0);
+	drm->gem_unmap_wq = alloc_ordered_workqueue("nouveau-gem-unmap", WQ_FREEZABLE);
 	if (!drm->gem_unmap_wq) {
 		nouveau_accel_fini(drm);
 		return;
@@ -383,6 +383,7 @@ nouveau_drm_load(struct drm_device *dev, unsigned long flags)
 {
 	struct pci_dev *pdev = dev->pdev;
 	struct nouveau_drm *drm;
+	struct nvkm_device *device;
 	int ret;
 
 	ret = nouveau_cli_create(nouveau_name(dev), "DRM", sizeof(*drm),
@@ -464,9 +465,14 @@ nouveau_drm_load(struct drm_device *dev, unsigned long flags)
 	if (ret)
 		goto fail_bios;
 
-	ret = nouveau_display_create(dev);
-	if (ret)
-		goto fail_dispctor;
+	device = nvxx_device(&drm->device);
+	if (device->oclass[NVDEV_ENGINE_DISP]) {
+		ret = nouveau_display_create(dev);
+		if (ret)
+			goto fail_dispctor;
+	} else {
+		drm_mode_config_init(dev);
+	}
 
 	if (dev->mode_config.num_crtc) {
 		ret = nouveau_display_init(dev);
@@ -489,7 +495,10 @@ nouveau_drm_load(struct drm_device *dev, unsigned long flags)
 	return 0;
 
 fail_dispinit:
-	nouveau_display_destroy(dev);
+	if (device->oclass[NVDEV_ENGINE_DISP])
+		nouveau_display_destroy(dev);
+	else
+		drm_mode_config_cleanup(dev);
 fail_dispctor:
 	nouveau_bios_takedown(dev);
 fail_bios:
@@ -507,6 +516,7 @@ static int
 nouveau_drm_unload(struct drm_device *dev)
 {
 	struct nouveau_drm *drm = nouveau_drm(dev);
+	struct nvkm_device *device = nvxx_device(&drm->device);
 
 	if (nouveau_runtime_pm != 0)
 		pm_runtime_forbid(dev->dev);
@@ -517,7 +527,10 @@ nouveau_drm_unload(struct drm_device *dev)
 
 	if (dev->mode_config.num_crtc)
 		nouveau_display_fini(dev);
-	nouveau_display_destroy(dev);
+	if (device->oclass[NVDEV_ENGINE_DISP])
+		nouveau_display_destroy(dev);
+	else
+		drm_mode_config_cleanup(dev);
 
 	nouveau_bios_takedown(dev);
 
@@ -572,8 +585,6 @@ nouveau_do_suspend(struct drm_device *dev, bool runtime)
 			return ret;
 	}
 
-	flush_workqueue(drm->gem_unmap_wq);
-
 	if (dev->pdev) {
 		NV_INFO(drm, "evicting buffers...\n");
 		ttm_bo_evict_mm(&drm->ttm.bdev, TTM_PL_VRAM);
@@ -594,7 +605,23 @@ nouveau_do_suspend(struct drm_device *dev, bool runtime)
 
 	NV_INFO(drm, "waiting for client channels to go idle...\n");
 	list_for_each_entry(cli, &drm->clients, head) {
-		mutex_lock(&cli->mutex);
+		/*
+		 * XXX
+		 * For system suspend we should be able to get the lock all the
+		 * time. To prevent a potential softhang during system suspend,
+		 * we use trylock and warn users if we can't get the lock. Then
+		 * we shall know we have some incorrect locking for this mutex
+		 * somewhere.
+		 */
+		if (!runtime) {
+			ret = mutex_trylock(&cli->mutex);
+			if (WARN_ON(!ret))
+				goto fail_display;
+
+		} else {
+			mutex_lock(&cli->mutex);
+		}
+
 		if (cli->abi16) {
 			struct nouveau_abi16 *abi16 = cli->abi16;
 			struct nouveau_abi16_chan *chan;
@@ -630,6 +657,8 @@ nouveau_do_suspend(struct drm_device *dev, bool runtime)
 		goto fail_client;
 
 	nouveau_agp_fini(drm);
+
+	NV_INFO(drm, "nouveau suspended\n");
 	return 0;
 
 fail_client:
@@ -681,6 +710,7 @@ nouveau_do_resume(struct drm_device *dev, bool runtime)
 		nouveau_fbcon_set_suspend(dev, 0);
 	}
 
+	NV_INFO(drm, "nouveau resumed\n");
 	return 0;
 }
 
@@ -960,6 +990,8 @@ nouveau_ioctls[] = {
 	DRM_IOCTL_DEF_DRV(NOUVEAU_GEM_AS_ALLOC, nouveau_gem_ioctl_as_alloc, DRM_UNLOCKED|DRM_AUTH|DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(NOUVEAU_GEM_AS_FREE, nouveau_gem_ioctl_as_free, DRM_UNLOCKED|DRM_AUTH|DRM_RENDER_ALLOW),
 	DRM_IOCTL_DEF_DRV(NOUVEAU_GEM_SET_ERROR_NOTIFIER, nouveau_gem_ioctl_set_error_notifier, DRM_UNLOCKED|DRM_AUTH|DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(NOUVEAU_GEM_MAP, nouveau_gem_ioctl_map, DRM_UNLOCKED|DRM_AUTH|DRM_RENDER_ALLOW),
+	DRM_IOCTL_DEF_DRV(NOUVEAU_GEM_UNMAP, nouveau_gem_ioctl_unmap, DRM_UNLOCKED|DRM_AUTH|DRM_RENDER_ALLOW),
 };
 
 long

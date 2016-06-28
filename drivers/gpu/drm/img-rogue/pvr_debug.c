@@ -947,20 +947,17 @@ static void *_DebugDumpDebugSeqNext(struct seq_file *psSeqFile,
 										  *puiPosition);
 }
 
-static struct seq_file *gpsDumpDebugPrintfSeqFile = NULL;
-
-static void _DumpDebugSeqPrintf(const IMG_CHAR *pszFormat, ...)
+static void _DumpDebugSeqPrintf(void *pvDumpDebugFile,
+				const IMG_CHAR *pszFormat, ...)
 {
-	if (gpsDumpDebugPrintfSeqFile)
-	{
-		IMG_CHAR  szBuffer[PVR_MAX_DEBUG_MESSAGE_LEN];
-		va_list  ArgList;
+	struct seq_file *psSeqFile = (struct seq_file *)pvDumpDebugFile;
+	IMG_CHAR  szBuffer[PVR_MAX_DEBUG_MESSAGE_LEN];
+	va_list  ArgList;
 
-		va_start(ArgList, pszFormat);
-		vsnprintf(szBuffer, PVR_MAX_DEBUG_MESSAGE_LEN, pszFormat, ArgList);
-		seq_printf(gpsDumpDebugPrintfSeqFile, "%s\n", szBuffer);
-		va_end(ArgList);
-	}
+	va_start(ArgList, pszFormat);
+	vsnprintf(szBuffer, PVR_MAX_DEBUG_MESSAGE_LEN, pszFormat, ArgList);
+	va_end(ArgList);
+	seq_printf(psSeqFile, "%s\n", szBuffer);
 }
 
 static int _DebugDumpDebugSeqShow(struct seq_file *psSeqFile, void *pvData)
@@ -968,20 +965,18 @@ static int _DebugDumpDebugSeqShow(struct seq_file *psSeqFile, void *pvData)
 	if (pvData != NULL  &&  pvData != SEQ_START_TOKEN)
 	{
 		PVRSRV_DEVICE_NODE *psDeviceNode = (PVRSRV_DEVICE_NODE *)pvData;
-		
+
 		if (psDeviceNode->pvDevice != NULL)
 		{
-			gpsDumpDebugPrintfSeqFile = psSeqFile;
-			PVRSRVDebugRequest(DEBUG_REQUEST_VERBOSITY_MAX, _DumpDebugSeqPrintf);
-			gpsDumpDebugPrintfSeqFile = NULL;
-			
+			PVRSRVDebugRequest(DEBUG_REQUEST_VERBOSITY_MAX,
+						_DumpDebugSeqPrintf, psSeqFile);
 		}
 	}
 
 	return 0;
 }
 
-static struct seq_operations gsDumpDebugReadOps = 
+static struct seq_operations gsDumpDebugReadOps =
 {
 	.start = _DebugDumpDebugSeqStart,
 	.stop  = _DebugDumpDebugSeqStop,
@@ -992,7 +987,6 @@ static struct seq_operations gsDumpDebugReadOps =
  Firmware Trace DebugFS entry
 */ /**************************************************************************/
 
-#if defined(PVRSRV_ENABLE_FW_TRACE_DEBUGFS)
 static void *_DebugFWTraceCompare_AnyVaCb(PVRSRV_DEVICE_NODE *psDevNode, va_list va)
 {
 	loff_t *puiCurrentPosition = va_arg(va, loff_t *);
@@ -1043,20 +1037,17 @@ static void *_DebugFWTraceSeqNext(struct seq_file *psSeqFile,
 										  *puiPosition);
 }
 
-static struct seq_file *gpsFWTracePrintfSeqFile = NULL;
-
-static void _FWTraceSeqPrintf(const IMG_CHAR *pszFormat, ...)
+static void _FWTraceSeqPrintf(void *pvDumpDebugFile,
+				const IMG_CHAR *pszFormat, ...)
 {
-	if (gpsFWTracePrintfSeqFile)
-	{
-		IMG_CHAR  szBuffer[PVR_MAX_DEBUG_MESSAGE_LEN];
-		va_list  ArgList;
+	struct seq_file *psSeqFile = (struct seq_file *)pvDumpDebugFile;
+	IMG_CHAR  szBuffer[PVR_MAX_DEBUG_MESSAGE_LEN];
+	va_list  ArgList;
 
-		va_start(ArgList, pszFormat);
-		vsnprintf(szBuffer, PVR_MAX_DEBUG_MESSAGE_LEN, pszFormat, ArgList);
-		seq_printf(gpsFWTracePrintfSeqFile, "%s\n", szBuffer);
-		va_end(ArgList);
-	}
+	va_start(ArgList, pszFormat);
+	vsnprintf(szBuffer, PVR_MAX_DEBUG_MESSAGE_LEN, pszFormat, ArgList);
+	va_end(ArgList);
+	seq_printf(psSeqFile, "%s\n", szBuffer);
 }
 
 static int _DebugFWTraceSeqShow(struct seq_file *psSeqFile, void *pvData)
@@ -1064,29 +1055,25 @@ static int _DebugFWTraceSeqShow(struct seq_file *psSeqFile, void *pvData)
 	if (pvData != NULL  &&  pvData != SEQ_START_TOKEN)
 	{
 		PVRSRV_DEVICE_NODE *psDeviceNode = (PVRSRV_DEVICE_NODE *)pvData;
-		
+
 		if (psDeviceNode->pvDevice != NULL)
 		{
 			PVRSRV_RGXDEV_INFO *psDevInfo = psDeviceNode->pvDevice;
 
-			gpsFWTracePrintfSeqFile = psSeqFile;
-			RGXDumpFirmwareTrace(_FWTraceSeqPrintf, psDevInfo);
-			gpsFWTracePrintfSeqFile = NULL;
+			RGXDumpFirmwareTrace(_FWTraceSeqPrintf, psSeqFile, psDevInfo);
 		}
 	}
 
 	return 0;
 }
 
-static struct seq_operations gsFWTraceReadOps = 
+static struct seq_operations gsFWTraceReadOps =
 {
 	.start = _DebugFWTraceSeqStart,
 	.stop  = _DebugFWTraceSeqStop,
 	.next  = _DebugFWTraceSeqNext,
 	.show  = _DebugFWTraceSeqShow,
 };
-#endif
-
 
 /*************************************************************************/ /*!
  Debug level DebugFS entry
@@ -1188,9 +1175,7 @@ static PVR_DEBUGFS_ENTRY_DATA *gpsVersionDebugFSEntry;
 static PVR_DEBUGFS_ENTRY_DATA *gpsStatusDebugFSEntry;
 static PVR_DEBUGFS_ENTRY_DATA *gpsDumpDebugDebugFSEntry;
 
-#if defined(PVRSRV_ENABLE_FW_TRACE_DEBUGFS)
 static PVR_DEBUGFS_ENTRY_DATA *gpsFWTraceDebugFSEntry;
-#endif
 
 #if defined(DEBUG)
 static PVR_DEBUGFS_ENTRY_DATA *gpsDebugLevelDebugFSEntry;
@@ -1244,7 +1229,6 @@ int PVRDebugCreateDebugFSEntries(void)
 		goto ErrorRemoveStatusEntry;
 	}
 
-#if defined(PVRSRV_ENABLE_FW_TRACE_DEBUGFS)
 	iResult = PVRDebugFSCreateEntry("firmware_trace",
 									NULL,
 									&gsFWTraceReadOps,
@@ -1255,7 +1239,6 @@ int PVRDebugCreateDebugFSEntries(void)
 	{
 		goto ErrorRemoveDumpDebugEntry;
 	}
-#endif
 
 #if defined(DEBUG)
 	iResult = PVRDebugFSCreateEntry("debug_level",
@@ -1266,25 +1249,19 @@ int PVRDebugCreateDebugFSEntries(void)
 									&gpsDebugLevelDebugFSEntry);
 	if (iResult != 0)
 	{
-#if defined(PVRSRV_ENABLE_FW_TRACE_DEBUGFS)
 		goto ErrorRemoveFWTraceLogEntry;
-#else
-		goto ErrorRemoveDumpDebugEntry;
-#endif
 	}
 #endif
 
 	return 0;
 
-#if (defined(DEBUG) && defined(PVRSRV_ENABLE_FW_TRACE_DEBUGFS))
+#if defined(DEBUG) || defined(PVR_DPF_ADHOC_DEBUG_ON)
 ErrorRemoveFWTraceLogEntry:
 	PVRDebugFSRemoveEntry(&gpsFWTraceDebugFSEntry);
 #endif
 
-#if (defined(DEBUG) || defined(PVRSRV_ENABLE_FW_TRACE_DEBUGFS))
 ErrorRemoveDumpDebugEntry:
 	PVRDebugFSRemoveEntry(&gpsDumpDebugDebugFSEntry);
-#endif
 
 ErrorRemoveStatusEntry:
 	PVRDebugFSRemoveEntry(&gpsStatusDebugFSEntry);
@@ -1308,12 +1285,10 @@ void PVRDebugRemoveDebugFSEntries(void)
 	}
 #endif
 
-#if defined(PVRSRV_ENABLE_FW_TRACE_DEBUGFS)
 	if (gpsFWTraceDebugFSEntry != NULL)
 	{
 		PVRDebugFSRemoveEntry(&gpsFWTraceDebugFSEntry);
 	}
-#endif
 
 	if (gpsDumpDebugDebugFSEntry != NULL)
 	{

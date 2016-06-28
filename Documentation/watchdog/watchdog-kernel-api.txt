@@ -36,6 +36,10 @@ The watchdog_unregister_device routine deregisters a registered watchdog timer
 device. The parameter of this routine is the pointer to the registered
 watchdog_device structure.
 
+The watchdog subsystem includes an registration deferral mechanism,
+which allows you to register an watchdog as early as you wish during
+the boot process.
+
 The watchdog device structure looks like this:
 
 struct watchdog_device {
@@ -49,9 +53,11 @@ struct watchdog_device {
 	unsigned int timeout;
 	unsigned int min_timeout;
 	unsigned int max_timeout;
+	struct notifier_block restart_nb;
 	void *driver_data;
 	struct mutex lock;
 	unsigned long status;
+	struct list_head deferred;
 };
 
 It contains following fields:
@@ -70,6 +76,10 @@ It contains following fields:
 * timeout: the watchdog timer's timeout value (in seconds).
 * min_timeout: the watchdog timer's minimum timeout value (in seconds).
 * max_timeout: the watchdog timer's maximum timeout value (in seconds).
+* restart_nb: notifier block that is registered for machine restart, for
+  internal use only. If a watchdog is capable of restarting the machine, it
+  should define ops->restart. Priority can be changed through
+  watchdog_set_restart_priority.
 * bootstatus: status of the device after booting (reported with watchdog
   WDIOF_* status bits).
 * driver_data: a pointer to the drivers private data of a watchdog device.
@@ -80,6 +90,8 @@ It contains following fields:
   information about the status of the device (Like: is the watchdog timer
   running/active, is the nowayout bit set, is the device opened via
   the /dev/watchdog interface or not, ...).
+* deferred: entry in wtd_deferred_reg_list which is used to
+  register early initialized watchdogs.
 
 The list of watchdog operations is defined as:
 
@@ -93,6 +105,7 @@ struct watchdog_ops {
 	unsigned int (*status)(struct watchdog_device *);
 	int (*set_timeout)(struct watchdog_device *, unsigned int);
 	unsigned int (*get_timeleft)(struct watchdog_device *);
+	int (*restart)(struct watchdog_device *);
 	void (*ref)(struct watchdog_device *);
 	void (*unref)(struct watchdog_device *);
 	long (*ioctl)(struct watchdog_device *, unsigned int, unsigned long);
@@ -157,6 +170,8 @@ they are supported. These optional routines/operations are:
   (Note: the WDIOF_SETTIMEOUT needs to be set in the options field of the
   watchdog's info structure).
 * get_timeleft: this routines returns the time that's left before a reset.
+* restart: this routine restarts the machine. It returns 0 on success or a
+  negative errno code for failure.
 * ref: the operation that calls kref_get on the kref of a dynamically
   allocated watchdog_device struct.
 * unref: the operation that calls kref_put on the kref of a dynamically
@@ -224,3 +239,14 @@ the device tree (if the module timeout parameter is invalid). Best practice is
 to set the default timeout value as timeout value in the watchdog_device and
 then use this function to set the user "preferred" timeout value.
 This routine returns zero on success and a negative errno code for failure.
+
+To change the priority of the restart handler the following helper should be
+used:
+
+void watchdog_set_restart_priority(struct watchdog_device *wdd, int priority);
+
+User should follow the following guidelines for setting the priority:
+* 0: should be called in last resort, has limited restart capabilities
+* 128: default restart handler, use if no other handler is expected to be
+  available, and/or if restart is sufficient to restart the entire system
+* 255: highest priority, will preempt all other restart handlers

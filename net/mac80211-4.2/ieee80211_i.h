@@ -45,6 +45,17 @@ struct ieee80211_local;
  * frame can be up to about 2 kB long. */
 #define TOTAL_MAX_TX_BUFFER 512
 
+/* The number of stations exposed via netdev queues. First 4 netdev queues are
+ * mapped to vif's ACs. Subsequent ones, in groups of 4, are ACs for stations.
+ * NUM_NDEV_STA + 1 station is wrapped around to 1st station. f.e. netdev queue
+ * 5 corresponds to AC1 of STA0, STA63, STA126, ... and queue 8 corresponds
+ * to AC0 of STA1, STA64, STA127, ...
+ *
+ * This is used only when driver implements wake_tx_queues() op.
+ */
+#define IEEE80211_NUM_NDEV_STA 16
+#define IEEE80211_NUM_NDEV_STA_Q (IEEE80211_NUM_NDEV_STA * IEEE80211_NUM_ACS)
+
 /* Required encryption head and tailroom */
 #define IEEE80211_ENCRYPT_HEADROOM 8
 #define IEEE80211_ENCRYPT_TAILROOM 18
@@ -637,6 +648,7 @@ struct ieee80211_if_mesh {
 	struct timer_list housekeeping_timer;
 	struct timer_list mesh_path_timer;
 	struct timer_list mesh_path_root_timer;
+	struct timer_list mpath_stats_timer;
 
 	unsigned long wrkq_flags;
 	unsigned long mbss_changed;
@@ -705,6 +717,9 @@ struct ieee80211_if_mesh {
 
 	/* offset from skb->data while building IE */
 	int meshconf_offset;
+
+	u8 bitrate_avg_weight;
+	u8 path_switch_threshold;
 };
 
 #ifdef CONFIG_MAC80211_MESH
@@ -811,6 +826,7 @@ enum txq_info_flags {
 struct txq_info {
 	struct sk_buff_head queue;
 	unsigned long flags;
+	unsigned long byte_cnt;
 
 	/* keep last! */
 	struct ieee80211_txq txq;
@@ -858,7 +874,12 @@ struct ieee80211_sub_if_data {
 	bool control_port_no_encrypt;
 	int encrypt_headroom;
 
+	spinlock_t ndev_lock; /* protects access to ndev_sta_idr */
+	DECLARE_BITMAP(ndev_sta_q_stopped, IEEE80211_NUM_NDEV_STA_Q);
+	atomic_t ndev_sta_q_refs[IEEE80211_NUM_NDEV_STA_Q];
+	struct idr ndev_sta_idr;
 	atomic_t txqs_len[IEEE80211_NUM_ACS];
+
 	struct ieee80211_tx_queue_params tx_conf[IEEE80211_NUM_ACS];
 	struct mac80211_qos_map __rcu *qos_map;
 
@@ -920,6 +941,9 @@ struct ieee80211_sub_if_data {
 		struct dentry *default_unicast_key;
 		struct dentry *default_multicast_key;
 		struct dentry *default_mgmt_key;
+#ifdef CONFIG_MAC80211_MESH
+		struct dentry *subdir_destinations;
+#endif
 	} debugfs;
 #endif
 
@@ -1333,6 +1357,8 @@ struct ieee80211_local {
 		struct dentry *rcdir;
 		struct dentry *keys;
 	} debugfs;
+
+	bool rx_stats_enabled;
 #endif
 
 	/*

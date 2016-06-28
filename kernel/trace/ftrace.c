@@ -387,6 +387,8 @@ static int remove_ftrace_list_ops(struct ftrace_ops **list,
 	return ret;
 }
 
+static void ftrace_update_trampoline(struct ftrace_ops *ops);
+
 static int __register_ftrace_function(struct ftrace_ops *ops)
 {
 	if (ops->flags & FTRACE_OPS_FL_DELETED)
@@ -418,6 +420,8 @@ static int __register_ftrace_function(struct ftrace_ops *ops)
 		add_ftrace_list_ops(&ftrace_control_list, &control_ops, ops);
 	} else
 		add_ftrace_ops(&ftrace_ops_list, ops);
+
+	ftrace_update_trampoline(ops);
 
 	if (ftrace_enabled)
 		update_ftrace_function();
@@ -565,13 +569,13 @@ static int function_stat_cmp(void *p1, void *p2)
 static int function_stat_headers(struct seq_file *m)
 {
 #ifdef CONFIG_FUNCTION_GRAPH_TRACER
-	seq_printf(m, "  Function                               "
-		   "Hit    Time            Avg             s^2\n"
-		      "  --------                               "
-		   "---    ----            ---             ---\n");
+	seq_puts(m, "  Function                               "
+		 "Hit    Time            Avg             s^2\n"
+		    "  --------                               "
+		 "---    ----            ---             ---\n");
 #else
-	seq_printf(m, "  Function                               Hit\n"
-		      "  --------                               ---\n");
+	seq_puts(m, "  Function                               Hit\n"
+		    "  --------                               ---\n");
 #endif
 	return 0;
 }
@@ -598,7 +602,7 @@ static int function_stat_show(struct seq_file *m, void *v)
 	seq_printf(m, "  %-30.30s  %10lu", str, rec->counter);
 
 #ifdef CONFIG_FUNCTION_GRAPH_TRACER
-	seq_printf(m, "    ");
+	seq_puts(m, "    ");
 	avg = rec->time;
 	do_div(avg, rec->counter);
 
@@ -2948,6 +2952,22 @@ static void t_stop(struct seq_file *m, void *p)
 	mutex_unlock(&ftrace_lock);
 }
 
+void * __weak
+arch_ftrace_trampoline_func(struct ftrace_ops *ops, struct dyn_ftrace *rec)
+{
+	return NULL;
+}
+
+static void add_trampoline_func(struct seq_file *m, struct ftrace_ops *ops,
+				struct dyn_ftrace *rec)
+{
+	void *ptr;
+
+	ptr = arch_ftrace_trampoline_func(ops, rec);
+	if (ptr)
+		seq_printf(m, " ->%pS", ptr);
+}
+
 static int t_show(struct seq_file *m, void *v)
 {
 	struct ftrace_iterator *iter = m->private;
@@ -2958,9 +2978,9 @@ static int t_show(struct seq_file *m, void *v)
 
 	if (iter->flags & FTRACE_ITER_PRINTALL) {
 		if (iter->flags & FTRACE_ITER_NOTRACE)
-			seq_printf(m, "#### no functions disabled ####\n");
+			seq_puts(m, "#### no functions disabled ####\n");
 		else
-			seq_printf(m, "#### all functions enabled ####\n");
+			seq_puts(m, "#### all functions enabled ####\n");
 		return 0;
 	}
 
@@ -2971,22 +2991,24 @@ static int t_show(struct seq_file *m, void *v)
 
 	seq_printf(m, "%ps", (void *)rec->ip);
 	if (iter->flags & FTRACE_ITER_ENABLED) {
+		struct ftrace_ops *ops = NULL;
+
 		seq_printf(m, " (%ld)%s",
 			   ftrace_rec_count(rec),
 			   rec->flags & FTRACE_FL_REGS ? " R" : "  ");
 		if (rec->flags & FTRACE_FL_TRAMP_EN) {
-			struct ftrace_ops *ops;
-
 			ops = ftrace_find_tramp_ops_any(rec);
 			if (ops)
 				seq_printf(m, "\ttramp: %pS",
 					   (void *)ops->trampoline);
 			else
-				seq_printf(m, "\ttramp: ERROR!");
+				seq_puts(m, "\ttramp: ERROR!");
+
 		}
+		add_trampoline_func(m, ops, rec);
 	}	
 
-	seq_printf(m, "\n");
+	seq_putc(m, '\n');
 
 	return 0;
 }
@@ -3019,9 +3041,6 @@ static int
 ftrace_enabled_open(struct inode *inode, struct file *file)
 {
 	struct ftrace_iterator *iter;
-
-	if (unlikely(ftrace_disabled))
-		return -ENODEV;
 
 	iter = __seq_open_private(file, &show_ftrace_seq_ops, sizeof(*iter));
 	if (iter) {
@@ -3975,6 +3994,9 @@ static char ftrace_graph_buf[FTRACE_FILTER_SIZE] __initdata;
 static char ftrace_graph_notrace_buf[FTRACE_FILTER_SIZE] __initdata;
 static int ftrace_set_func(unsigned long *array, int *idx, int size, char *buffer);
 
+static unsigned long save_global_trampoline;
+static unsigned long save_global_flags;
+
 static int __init set_graph_function(char *str)
 {
 	strlcpy(ftrace_graph_buf, str, FTRACE_FILTER_SIZE);
@@ -4183,9 +4205,9 @@ static int g_show(struct seq_file *m, void *v)
 		struct ftrace_graph_data *fgd = m->private;
 
 		if (fgd->table == ftrace_graph_funcs)
-			seq_printf(m, "#### all functions enabled ####\n");
+			seq_puts(m, "#### all functions enabled ####\n");
 		else
-			seq_printf(m, "#### no functions disabled ####\n");
+			seq_puts(m, "#### no functions disabled ####\n");
 		return 0;
 	}
 
@@ -4696,6 +4718,20 @@ void __init ftrace_init(void)
 	ftrace_disabled = 1;
 }
 
+/* Do nothing if arch does not support this */
+void __weak arch_ftrace_update_trampoline(struct ftrace_ops *ops)
+{
+}
+
+static void ftrace_update_trampoline(struct ftrace_ops *ops)
+{
+	/* Currently, only non dynamic ops can have a trampoline */
+	if (ops->flags & FTRACE_OPS_FL_DYNAMIC)
+		return;
+
+	arch_ftrace_update_trampoline(ops);
+}
+
 #else
 
 static struct ftrace_ops global_ops = {
@@ -4736,6 +4772,10 @@ static inline int
 ftrace_ops_test(struct ftrace_ops *ops, unsigned long ip, void *regs)
 {
 	return 1;
+}
+
+static void ftrace_update_trampoline(struct ftrace_ops *ops)
+{
 }
 
 #endif /* CONFIG_DYNAMIC_FTRACE */
@@ -5075,12 +5115,12 @@ static int fpid_show(struct seq_file *m, void *v)
 	const struct ftrace_pid *fpid = list_entry(v, struct ftrace_pid, list);
 
 	if (v == (void *)1) {
-		seq_printf(m, "no pid\n");
+		seq_puts(m, "no pid\n");
 		return 0;
 	}
 
 	if (fpid->pid == ftrace_swapper_pid)
-		seq_printf(m, "swapper tasks\n");
+		seq_puts(m, "swapper tasks\n");
 	else
 		seq_printf(m, "%u\n", pid_vnr(fpid->pid));
 
@@ -5522,7 +5562,6 @@ int register_ftrace_graph(trace_func_graph_ret_t retfunc,
 	update_function_graph_func();
 
 	ret = ftrace_startup(&graph_ops, FTRACE_START_FUNC_RET);
-
 out:
 	mutex_unlock(&ftrace_lock);
 	return ret;
@@ -5542,6 +5581,17 @@ void unregister_ftrace_graph(void)
 	ftrace_shutdown(&graph_ops, FTRACE_STOP_FUNC_RET);
 	unregister_pm_notifier(&ftrace_suspend_notifier);
 	unregister_trace_sched_switch(ftrace_graph_probe_sched_switch, NULL);
+
+#ifdef CONFIG_DYNAMIC_FTRACE
+	/*
+	 * Function graph does not allocate the trampoline, but
+	 * other global_ops do. We need to reset the ALLOC_TRAMP flag
+	 * if one was used.
+	 */
+	global_ops.trampoline = save_global_trampoline;
+	if (save_global_flags & FTRACE_OPS_FL_ALLOC_TRAMP)
+		global_ops.flags |= FTRACE_OPS_FL_ALLOC_TRAMP;
+#endif
 
  out:
 	mutex_unlock(&ftrace_lock);

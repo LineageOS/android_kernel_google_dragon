@@ -245,6 +245,13 @@ struct sta_ampdu_mlme {
 
 #define IEEE80211_FAST_XMIT_MAX_IV	18
 
+#define IEEE80211_HT_MCS_NUM		32
+#define IEEE80211_VHT_MCS_NUM		10
+#define IEEE80211_BW_NUM		4
+#define IEEE80211_NSS_NUM		4
+#define IEEE80211_GI_NUM		2
+#define IEEE80211_RATE_TABLE_NUM	320
+#define IEEE80211_LEGACY_RATE_NUM	12
 /**
  * struct ieee80211_fast_tx - TX fastpath information
  * @key: key to use for hw crypto
@@ -317,6 +324,9 @@ struct mesh_sta {
 
 	/* moving percentage of failed MSDUs */
 	unsigned int fail_avg;
+
+	/* moving avg of bitrate in 1kbps */
+	u32 bitrate_avg;
 };
 
 /**
@@ -427,6 +437,12 @@ struct sta_info {
 
 	struct ieee80211_fast_tx __rcu *fast_tx;
 
+	DECLARE_BITMAP(txqs_stopped, IEEE80211_NUM_ACS);
+	atomic_t txqs_len[IEEE80211_NUM_ACS];
+	u16 sta_id;
+	u16 sta_id_off;
+	bool sta_id_set;
+
 #ifdef CONFIG_MAC80211_MESH
 	struct mesh_sta *mesh;
 #endif
@@ -495,10 +511,27 @@ struct sta_info {
 	u8 timer_to_tid[IEEE80211_NUM_TIDS];
 
 #ifdef CONFIG_MAC80211_DEBUGFS
+	/* force link degradation by this db */
+	u32 link_degrade_db;
 	struct sta_info_debugfsdentries {
 		struct dentry *dir;
 		bool add_has_run;
 	} debugfs;
+
+	u64 rx_legacy_pkt[IEEE80211_LEGACY_RATE_NUM];
+	u64 rx_ht_pkt[IEEE80211_HT_MCS_NUM];
+	u64 rx_vht_pkt[IEEE80211_VHT_MCS_NUM];
+	u64 rx_bw_pkt[IEEE80211_BW_NUM];
+	u64 rx_nss_pkt[IEEE80211_NSS_NUM];
+	u64 rx_gi_pkt[IEEE80211_GI_NUM];
+	u64 rx_rate_pkt[IEEE80211_RATE_TABLE_NUM];
+	u64 rx_legacy_byte[IEEE80211_LEGACY_RATE_NUM];
+	u64 rx_ht_byte[IEEE80211_HT_MCS_NUM];
+	u64 rx_vht_byte[IEEE80211_VHT_MCS_NUM];
+	u64 rx_bw_byte[IEEE80211_BW_NUM];
+	u64 rx_nss_byte[IEEE80211_NSS_NUM];
+	u64 rx_gi_byte[IEEE80211_GI_NUM];
+	u64 rx_rate_byte[IEEE80211_RATE_TABLE_NUM];
 #endif
 
 	enum ieee80211_sta_rx_bandwidth cur_max_bandwidth;
@@ -513,6 +546,8 @@ struct sta_info {
 	unsigned long last_tdls_pkt_time;
 
 	u8 reserved_tid;
+
+	struct cfg80211_chan_def tdls_chandef;
 
 	/* keep last! */
 	struct ieee80211_sta sta;
@@ -639,6 +674,11 @@ struct sta_info *sta_info_alloc(struct ieee80211_sub_if_data *sdata,
 				const u8 *addr, gfp_t gfp);
 
 void sta_info_free(struct ieee80211_local *local, struct sta_info *sta);
+
+void sta_info_ndev_init(struct ieee80211_sub_if_data *sdata,
+			struct sta_info *sta);
+void sta_info_ndev_free(struct ieee80211_sub_if_data *sdata,
+		        struct sta_info *sta);
 
 /*
  * Insert STA info into hash table/list, returns zero or a

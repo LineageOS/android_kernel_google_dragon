@@ -22,6 +22,7 @@
  * Authors: Ben Skeggs
  */
 
+#include <subdev/bar.h>
 #include <subdev/ltc.h>
 #include <subdev/mmu.h>
 #include <subdev/fb.h>
@@ -45,14 +46,13 @@ nvkm_vm_map_at(struct nvkm_vma *vma, u64 delta, struct nvkm_mem *node)
 	struct nvkm_ltc *ltc = nvkm_ltc(mmu);
 	struct nvkm_mm_node *r;
 	int big = vma->node->type != mmu->spg_shift;
-	u32 offset = vma->node->offset + (delta >> 12);
+	u32 offset = vma->node->offset;
 	u32 bits = vma->node->type - 12;
 	u32 pde  = (offset >> mmu->pgt_bits) - vm->fpde;
 	u32 pte  = (offset & ((1 << mmu->pgt_bits) - 1)) >> bits;
 	u32 max  = 1 << (mmu->pgt_bits - bits);
 	u32 end, len;
 
-	delta = 0;
 	list_for_each_entry(r, &node->regions, rl_entry) {
 		u64 phys = (u64)r->offset << 12;
 		u32 num  = r->length >> bits;
@@ -91,23 +91,36 @@ nvkm_vm_map_sg_table(struct nvkm_vma *vma, u64 delta, u64 length,
 	struct nvkm_mmu *mmu = vm->mmu;
 	struct nvkm_ltc *ltc = nvkm_ltc(mmu);
 	int big = vma->node->type != mmu->spg_shift;
-	u32 offset = vma->node->offset + (delta >> 12);
+	u32 offset = vma->node->offset;
 	u32 bits = vma->node->type - 12;
 	u32 num  = length >> vma->node->type;
 	u32 pde  = (offset >> mmu->pgt_bits) - vm->fpde;
 	u32 pte  = (offset & ((1 << mmu->pgt_bits) - 1)) >> bits;
 	u32 max  = 1 << (mmu->pgt_bits - bits);
-	unsigned m, sglen;
+	unsigned m;
 	u32 end, len;
-	int i;
 	struct scatterlist *sg;
+	u64 skip;
 
-	for_each_sg(mem->sg->sgl, sg, mem->sg->nents, i) {
+	/*
+	 * Skip "delta" bytes into the sgl. "skip" is left with the offset
+	 * into the first sg element we want to start with.
+	 */
+	sg = mem->sg->sgl;
+	skip = delta;
+	while (skip >= sg_dma_len(sg)) {
+		skip -= sg_dma_len(sg);
+		sg = sg_next(sg);
+	}
+
+	while (sg) {
 		dma_addr_t *addr_list;
 		struct nvkm_gpuobj *pgt = vm->pgt[pde].obj[big];
-		dma_addr_t sgdma = sg_dma_address(sg);
+		dma_addr_t sgdma = sg_dma_address(sg) + skip;
+		unsigned sglen = (sg_dma_len(sg) - skip) >> PAGE_SHIFT;
 
-		sglen = sg_dma_len(sg) >> PAGE_SHIFT;
+		skip = 0;
+
 next_pde:
 		end = pte + sglen;
 		if (unlikely(end >= max))
@@ -123,7 +136,7 @@ next_pde:
 		for (m = 0; m < len; m++)
 			addr_list[m] = sgdma + (m << PAGE_SHIFT);
 
-		mmu->map_sg(vma, pgt, mem, pte, len, addr_list, 0);
+		mmu->map_sg(vma, pgt, mem, pte, len, addr_list, delta);
 		kfree(addr_list);
 		pte += m;
 		num -= m;
@@ -135,12 +148,17 @@ next_pde:
 			pde++;
 			pte = 0;
 		}
+
+		delta += (u64)len << vma->node->type;
+
 		if (m < sglen) {
 			sglen -= m;
 			sgdma += m << PAGE_SHIFT;
 			pgt = vm->pgt[pde].obj[big];
 			goto next_pde;
 		}
+
+		sg = sg_next(sg);
 	}
 finish:
 	ltc->invalidate(ltc);
@@ -154,7 +172,7 @@ nvkm_vm_map_sg_table_with_iommu(struct nvkm_vma *vma, u64 delta, u64 length,
 	struct nvkm_vm *vm = vma->vm;
 	struct nvkm_mmu *mmu = vm->mmu;
 	struct nvkm_ltc *ltc = nvkm_ltc(mmu);
-	u32 offset = vma->node->offset + (delta >> 12);
+	u32 offset = vma->node->offset;
 	u32 bits = vma->node->type - 12;
 	u32 num  = length >> vma->node->type;
 	u32 max  = 1 << (mmu->pgt_bits - bits);
@@ -163,7 +181,8 @@ nvkm_vm_map_sg_table_with_iommu(struct nvkm_vma *vma, u64 delta, u64 length,
 	dma_addr_t *addr_list, *list;
 
 	if (likely(!vma->iommu_mapping)) {
-		vma->iommu_mapping = mmu->map_sg_iommu(mmu, mem->sg, length, &iova);
+		vma->iommu_mapping = mmu->map_sg_iommu(mmu, mem->sg,
+						       mem->size << 12, &iova);
 		if (IS_ERR(vma->iommu_mapping)) {
 			vma->iommu_mapping = NULL;
 			return;
@@ -173,7 +192,7 @@ nvkm_vm_map_sg_table_with_iommu(struct nvkm_vma *vma, u64 delta, u64 length,
 		iova = vma->iommu_iova;
 	}
 
-	addr_list = kmalloc(sizeof(dma_addr_t) * num, GFP_KERNEL);
+	addr_list = vmalloc(sizeof(dma_addr_t) * num);
 	if (!addr_list) {
 		mmu->unmap_iommu(vma, vma->iommu_mapping);
 		nv_error(mmu, "no memory for dma list\n");
@@ -181,11 +200,10 @@ nvkm_vm_map_sg_table_with_iommu(struct nvkm_vma *vma, u64 delta, u64 length,
 	}
 
 	for (lpidx = 0; lpidx < num; lpidx++)
-		addr_list[lpidx] = iova + (lpidx << mmu->lpg_shift);
+		addr_list[lpidx] = iova + (lpidx << mmu->lpg_shift) + delta;
 
 	lpidx = 0;
 	list = addr_list;
-	delta = 0;
 	while (num) {
 		struct nvkm_gpuobj *pgt;
 		u32 lpoff, pde, pte, end, len;
@@ -208,7 +226,7 @@ nvkm_vm_map_sg_table_with_iommu(struct nvkm_vma *vma, u64 delta, u64 length,
 		delta += len << mmu->lpg_shift;
 	}
 
-	kfree(addr_list);
+	vfree(addr_list);
 
 	ltc->invalidate(ltc);
 	mmu->flush(vm);
@@ -223,7 +241,7 @@ nvkm_vm_map_sg(struct nvkm_vma *vma, u64 delta, u64 length,
 	dma_addr_t *list = mem->pages;
 	struct nvkm_ltc *ltc = nvkm_ltc(mmu);
 	int big = vma->node->type != mmu->spg_shift;
-	u32 offset = vma->node->offset + (delta >> 12);
+	u32 offset = vma->node->offset;
 	u32 bits = vma->node->type - 12;
 	u32 num  = length >> vma->node->type;
 	u32 pde  = (offset >> mmu->pgt_bits) - vm->fpde;
@@ -239,7 +257,7 @@ nvkm_vm_map_sg(struct nvkm_vma *vma, u64 delta, u64 length,
 			end = max;
 		len = end - pte;
 
-		mmu->map_sg(vma, pgt, mem, pte, len, list, 0);
+		mmu->map_sg(vma, pgt, mem, pte, len, list, delta);
 
 		num  -= len;
 		pte  += len;
@@ -248,6 +266,8 @@ nvkm_vm_map_sg(struct nvkm_vma *vma, u64 delta, u64 length,
 			pde++;
 			pte = 0;
 		}
+
+		delta += (u64)len << vma->node->type;
 	}
 
 	ltc->invalidate(ltc);
@@ -262,26 +282,28 @@ nvkm_vm_map(struct nvkm_vma *vma, struct nvkm_mem *node)
 
 	if (node->sg) {
 		if (mmu->iommu_capable && vma->node->type == mmu->lpg_shift)
-			nvkm_vm_map_sg_table_with_iommu(vma, 0, node->size << 12, node);
+			nvkm_vm_map_sg_table_with_iommu(vma, vma->delta,
+							vma->length, node);
 		else
-			nvkm_vm_map_sg_table(vma, 0, node->size << 12, node);
+			nvkm_vm_map_sg_table(vma, vma->delta, vma->length,
+					     node);
 	} else if (node->pages) {
-			nvkm_vm_map_sg(vma, 0, node->size << 12, node);
+			nvkm_vm_map_sg(vma, vma->delta, vma->length, node);
 	} else {
-		nvkm_vm_map_at(vma, 0, node);
+		nvkm_vm_map_at(vma, vma->delta, node);
 	}
 
 	vma->mapped = true;
 }
 
 static void
-nvkm_vm_unmap_at(struct nvkm_vma *vma, u64 delta, u64 length)
+nvkm_vm_unmap_at(struct nvkm_vma *vma, u64 length)
 {
 	struct nvkm_vm *vm = vma->vm;
 	struct nvkm_mmu *mmu = vm->mmu;
 	struct nvkm_ltc *ltc = nvkm_ltc(mmu);
 	int big = vma->node->type != mmu->spg_shift;
-	u32 offset = vma->node->offset + (delta >> 12);
+	u32 offset = vma->node->offset;
 	u32 bits = vma->node->type - 12;
 	u32 num  = length >> vma->node->type;
 	u32 pde  = (offset >> mmu->pgt_bits) - vm->fpde;
@@ -297,7 +319,10 @@ nvkm_vm_unmap_at(struct nvkm_vma *vma, u64 delta, u64 length)
 			end = max;
 		len = end - pte;
 
-		mmu->unmap(pgt, pte, len);
+		if (unlikely(vma->as && vma->as->sparse))
+			mmu->sparse(pgt, pte, len);
+		else
+			mmu->unmap(pgt, pte, len);
 
 		num -= len;
 		pte += len;
@@ -333,7 +358,7 @@ nvkm_vm_unmap_iommu(struct nvkm_vma *vma)
 void
 nvkm_vm_unmap(struct nvkm_vma *vma)
 {
-	nvkm_vm_unmap_at(vma, 0, (u64)vma->node->length << 12);
+	nvkm_vm_unmap_at(vma, (u64)vma->node->length << 12);
 
 	if (vma->iommu_mapping)
 		nvkm_vm_unmap_iommu(vma);
@@ -347,6 +372,7 @@ nvkm_vm_unmap_pgt(struct nvkm_vm *vm, int big, u32 fpde, u32 lpde)
 	unsigned int num_unref_pgts = 0;
 	struct nvkm_gpuobj **unref_pgts;
 	struct nvkm_mmu *mmu = vm->mmu;
+	struct nvkm_ltc *ltc = nvkm_ltc(mmu);
 	struct nvkm_vm_pgd *vpgd;
 	struct nvkm_vm_pgt *vpgt;
 	struct nvkm_gpuobj *pgt;
@@ -375,6 +401,7 @@ nvkm_vm_unmap_pgt(struct nvkm_vm *vm, int big, u32 fpde, u32 lpde)
 
 		mutex_unlock(&nv_subdev(mmu)->mutex);
 
+		ltc->invalidate(ltc);
 		mmu->flush(vm);
 
 		for (i = 0; i < num_unref_pgts; ++i)
@@ -390,6 +417,7 @@ static int
 nvkm_vm_map_pgt(struct nvkm_vm *vm, u32 pde, u32 type)
 {
 	struct nvkm_mmu *mmu = vm->mmu;
+	struct nvkm_ltc *ltc = nvkm_ltc(mmu);
 	struct nvkm_vm_pgt *vpgt = &vm->pgt[pde - vm->fpde];
 	struct nvkm_vm_pgd *vpgd;
 	struct nvkm_gpuobj *pgt;
@@ -420,6 +448,11 @@ nvkm_vm_map_pgt(struct nvkm_vm *vm, u32 pde, u32 type)
 		mmu->map_pgt(vpgd->obj, pde, vpgt->obj);
 	}
 
+	mutex_unlock(&nv_subdev(mmu)->mutex);
+	ltc->invalidate(ltc);
+	mmu->flush(vm);
+	mutex_lock(&nv_subdev(mmu)->mutex);
+
 	return 0;
 }
 
@@ -437,8 +470,8 @@ nvkm_vm_find_as(struct nvkm_vm *vm, u64 offset)
 }
 
 int
-nvkm_vm_get_offset(struct nvkm_vm *vm, u64 size, u32 page_shift, u32 access,
-		   struct nvkm_vma *vma, u64 offset)
+nvkm_vm_get_offset(struct nvkm_vm *vm, u64 delta, u64 size, u32 page_shift,
+		   u32 access, struct nvkm_vma *vma, u64 offset)
 {
 	struct nvkm_mmu *mmu = vm->mmu;
 	u32 align = (1 << page_shift) >> 12;
@@ -504,14 +537,16 @@ nvkm_vm_get_offset(struct nvkm_vm *vm, u64 size, u32 page_shift, u32 access,
 	nvkm_vm_ref(vm, &vma->vm, NULL);
 	vma->offset = (u64)vma->node->offset << 12;
 	vma->access = access;
+	vma->delta = delta;
+	vma->length = size;
 	return 0;
 }
 
 int
-nvkm_vm_get(struct nvkm_vm *vm, u64 size, u32 page_shift, u32 access,
-	    struct nvkm_vma *vma)
+nvkm_vm_get(struct nvkm_vm *vm, u64 delta, u64 size, u32 page_shift,
+	    u32 access, struct nvkm_vma *vma)
 {
-	return nvkm_vm_get_offset(vm, size, page_shift, access, vma, 0);
+	return nvkm_vm_get_offset(vm, delta, size, page_shift, access, vma, 0);
 }
 
 void
@@ -593,6 +628,8 @@ static int
 nvkm_vm_link(struct nvkm_vm *vm, struct nvkm_gpuobj *pgd)
 {
 	struct nvkm_mmu *mmu = vm->mmu;
+	struct nvkm_ltc *ltc = nvkm_ltc(mmu);
+	struct nvkm_bar *bar = nvkm_bar(mmu);
 	struct nvkm_vm_pgd *vpgd;
 	int i;
 
@@ -610,6 +647,12 @@ nvkm_vm_link(struct nvkm_vm *vm, struct nvkm_gpuobj *pgd)
 		mmu->map_pgt(pgd, i, vm->pgt[i - vm->fpde].obj);
 	list_add(&vpgd->head, &vm->pgd_list);
 	mutex_unlock(&nv_subdev(mmu)->mutex);
+
+	ltc->invalidate(ltc);
+	/* bar might yet be initialized when this is called */
+	if (bar)
+		mmu->flush(vm);
+
 	return 0;
 }
 
@@ -745,7 +788,7 @@ int nvkm_vm_wait(struct nvkm_vm *vm)
 }
 
 int nvkm_vm_as_alloc(struct nvkm_vm *vm, u64 align, u64 length, u32 page_shift,
-		     u64 *address)
+		     u64 *address, bool sparse)
 {
 	struct nvkm_mmu *mmu = vm->mmu;
 	struct nvkm_as *as;
@@ -754,9 +797,14 @@ int nvkm_vm_as_alloc(struct nvkm_vm *vm, u64 align, u64 length, u32 page_shift,
 	u64 moffset = *address >> 12;
 	int ret;
 
+	if (sparse && !mmu->sparse)
+		return -ENOSYS;
+
 	as = kzalloc(sizeof(*as), GFP_KERNEL);
 	if (!as)
 		return -ENOMEM;
+
+	as->sparse = sparse;
 
 	/*
 	 * Figure out the requested alignment for mappings done in this address
@@ -784,12 +832,73 @@ int nvkm_vm_as_alloc(struct nvkm_vm *vm, u64 align, u64 length, u32 page_shift,
 	if (ret != 0)
 		goto error_mm_free;
 
-	list_add(&as->head, &vm->as_list);
-
-	mutex_unlock(&nv_subdev(mmu)->mutex);
-
 	as->offset = as->node->offset << 12;
 	as->length = as->node->length << 12;
+
+	list_add(&as->head, &vm->as_list);
+
+	/*
+	 * PDE/PTEs for sparse address space must be initialized immediately.
+	 *
+	 * This mimic the primitive implementation of downstream driver where
+	 * PTEs are always allocated for sparse page even if the whole PDE is
+	 * sparse.  Progressive approach should be considerred for replacement
+	 * in the future.
+	 */
+	if (sparse) {
+		struct nvkm_ltc *ltc = nvkm_ltc(mmu);
+		u32 fpde, lpde, pde, pte, num, max, bits, end, cnt;
+		int pgsz;
+
+		/* fill PDEs */
+		fpde = as->node->offset >> mmu->pgt_bits;
+		lpde = (as->node->offset + as->node->length - 1)
+			>> mmu->pgt_bits;
+		pgsz = as->align_shift == mmu->lpg_shift ?
+			BIG_PAGE_INDEX : SMALL_PAGE_INDEX;
+
+		for (pde = fpde; pde <= lpde; pde++) {
+			struct nvkm_vm_pgt *vpgt = &vm->pgt[pde - vm->fpde];
+
+			if (likely(vpgt->refcount[pgsz])) {
+				vpgt->refcount[pgsz]++;
+				continue;
+			}
+
+			ret = nvkm_vm_map_pgt(vm, pde, as->node->type);
+			if (ret) {
+				if (pde != fpde)
+					nvkm_vm_unmap_pgt(vm, pgsz, fpde, pde - 1);
+				goto error_mm_free;
+			}
+		}
+		mutex_unlock(&nv_subdev(mmu)->mutex);
+
+		bits = as->node->type - 12;
+		num = as->node->length >> bits;	/* total num of PTEs to fill */
+		max  = 1 << (mmu->pgt_bits - bits);	/* PTEs per table */
+		pte  = (as->node->offset & ((1 << mmu->pgt_bits) - 1)) >> bits;
+		pde = fpde;
+
+		while (num) {
+			struct nvkm_gpuobj *pgt = vm->pgt[pde].obj[pgsz];
+
+			end = (pte + num);
+			if (unlikely(end > max))
+				end = max;
+			cnt = end - pte;
+
+			mmu->sparse(pgt, pte, cnt);
+
+			num -= cnt;
+			pde++;
+			pte = 0;
+		}
+
+		ltc->invalidate(ltc);
+		mmu->flush(vm);
+	} else
+		mutex_unlock(&nv_subdev(mmu)->mutex);
 
 	*address = as->offset;
 
@@ -825,6 +934,48 @@ int nvkm_vm_as_free(struct nvkm_vm *vm, u64 offset)
 		mutex_unlock(&nv_subdev(mmu)->mutex);
 		return ret;
 	}
+	if (as->sparse) {
+		struct nvkm_ltc *ltc = nvkm_ltc(mmu);
+		u32 fpde, lpde, pde, pte, num, max, bits, end, cnt;
+		int pgsz;
+
+		/* release PDEs */
+		fpde = as->node->offset >> mmu->pgt_bits;
+		lpde = (as->node->offset + as->node->length - 1)
+			>> mmu->pgt_bits;
+		pgsz = as->align_shift == mmu->lpg_shift ?
+			BIG_PAGE_INDEX : SMALL_PAGE_INDEX;
+
+		bits = as->node->type - 12;
+		num = as->node->length >> bits;	/* total num of PTEs to fill */
+		max  = 1 << (mmu->pgt_bits - bits);	/* PTEs per table */
+		pte  = (as->node->offset & ((1 << mmu->pgt_bits) - 1)) >> bits;
+		pde = fpde;
+
+		/* Unlock the mutex since we'll flush mmu next */
+		mutex_unlock(&nv_subdev(mmu)->mutex);
+		/* Clear VOL bit */
+		while (num) {
+			struct nvkm_gpuobj *pgt = vm->pgt[pde].obj[pgsz];
+
+			end = (pte + num);
+			if (unlikely(end > max))
+				end = max;
+			cnt = end - pte;
+
+			mmu->unmap(pgt, pte, cnt);
+
+			num -= cnt;
+			pde++;
+			pte = 0;
+		}
+		ltc->invalidate(ltc);
+		mmu->flush(vm);
+
+		mutex_lock(&nv_subdev(mmu)->mutex);
+		nvkm_vm_unmap_pgt(vm, pgsz, fpde, lpde);
+	}
+
 	nvkm_mm_free(&vm->mm, &as->node);
 
 	list_del(&as->head);

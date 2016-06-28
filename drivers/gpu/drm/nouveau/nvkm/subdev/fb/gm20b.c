@@ -34,6 +34,7 @@ gm20b_fb_init(struct nvkm_object *object)
 		return ret;
 
 	nv_wr32(priv, 0x100800, nv_rd32(priv, 0x12006c));
+	nv_mask(priv, 0x100c80, 0x00001001, 0x00001001);
 	return 0;
 }
 
@@ -47,4 +48,5 @@ gm20b_fb_oclass = &(struct nvkm_fb_impl) {
 		.fini = _nvkm_fb_fini,
 	},
 	.memtype = gf100_fb_memtype_valid,
+	.ctag_granularity = 0x20000, /* 128KB */
 }.base;

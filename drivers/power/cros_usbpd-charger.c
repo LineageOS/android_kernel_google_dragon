@@ -40,6 +40,7 @@
 
 #define CHARGER_DIR_NAME		"CROS_USB_PD_CHARGER%d"
 #define CHARGER_DIR_NAME_LENGTH		sizeof(CHARGER_DIR_NAME)
+#define DRV_NAME "cros_usbpd-charger"
 
 #define MANUFACTURER_MODEL_LENGTH	32
 
@@ -348,11 +349,28 @@ static int cros_usb_pd_charger_get_prop(struct power_supply *psy,
 	struct port_data *port = container_of(psy, struct port_data, psy);
 	struct charger_data *charger = port->charger;
 	struct device *dev = charger->dev;
+	struct cros_ec_device *ec_device = charger->ec_device;
 	int ret;
 
 
 	/* Only refresh ec_port_status for dynamic properties */
 	switch (psp) {
+	case POWER_SUPPLY_PROP_ONLINE:
+		/*
+		 * If mkbp_event_supported, then we can be assured that
+		 * the driver's state for the online property is consistent
+		 * with the hardware. However, if we aren't event driven,
+		 * the optimization before to skip an ec_port_status get
+		 * and only returned cached values of the online property will
+		 * cause a delay in detecting a cable attach until one of the
+		 * other properties are read.
+		 *
+		 * Allow an ec_port_status refresh for online property check
+		 * if we're not already online to check for plug events if
+		 * not mkbp_event_supported.
+		 */
+		if (ec_device->mkbp_event_supported || port->psy_online)
+			break;
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
 	case POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN:
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
@@ -463,6 +481,7 @@ static void cros_usb_pd_print_log_entry(struct ec_response_pd_log *r,
 	struct usb_chg_measures *meas;
 	struct mcdp_info *minfo;
 	struct rtc_time rt;
+	s64 msecs;
 	int len = 0;
 	char buf[BUF_SIZE + 1];
 
@@ -531,10 +550,11 @@ static void cros_usb_pd_print_log_entry(struct ec_response_pd_log *r,
 		break;
 	}
 
-	pr_info("PDLOG %d/%02d/%02d %02d:%02d:%02d.%03d P%d %s\n",
+	msecs = ktime_to_ms(tstamp);
+	do_div(msecs, MSEC_PER_SEC);
+	pr_info("PDLOG %d/%02d/%02d %02d:%02d:%02d.%03lld P%d %s\n",
 		rt.tm_year + 1900, rt.tm_mon + 1, rt.tm_mday,
-		rt.tm_hour, rt.tm_min, rt.tm_sec,
-		(int)(ktime_to_ms(tstamp) % MSEC_PER_SEC),
+		rt.tm_hour, rt.tm_min, rt.tm_sec, msecs,
 		PD_LOG_PORT(r->size_port), buf);
 }
 
@@ -610,22 +630,20 @@ static int cros_usb_pd_charger_probe(struct platform_device *pd)
 
 	dev_dbg(dev, "cros_usb_pd_charger_probe\n");
 	if (!ec_dev) {
-		WARN(1, "%s: No EC dev found\n", dev_name(dev));
+		dev_err(dev, "No EC dev found\n");
 		return -EINVAL;
 	}
 
 	ec_device = ec_dev->ec_dev;
 	if (!ec_device) {
-		WARN(1, "%s: No EC device found\n", dev_name(dev));
+		dev_err(dev, "No EC device found.\n");
 		return -EINVAL;
 	}
 
 	charger = devm_kzalloc(dev, sizeof(struct charger_data),
 				    GFP_KERNEL);
-	if (!charger) {
-		dev_err(dev, "Failed to alloc charger. Failing probe.\n");
+	if (!charger)
 		return -ENOMEM;
-	}
 
 	charger->dev = dev;
 	charger->ec_dev = ec_dev;
@@ -890,13 +908,14 @@ struct attribute_group cros_usb_pd_charger_attr_group = {
 	.name = "usb-pd-charger",
 	.attrs = __ext_power_cmds_attrs,
 };
+EXPORT_SYMBOL(cros_usb_pd_charger_attr_group);
 
 static SIMPLE_DEV_PM_OPS(cros_usb_pd_charger_pm_ops,
 	cros_usb_pd_charger_suspend, cros_usb_pd_charger_resume);
 
 static struct platform_driver cros_usb_pd_charger_driver = {
 	.driver = {
-		.name = "cros-usb-pd-charger",
+		.name = DRV_NAME,
 		.owner = THIS_MODULE,
 		.pm = &cros_usb_pd_charger_pm_ops,
 	},
@@ -908,4 +927,4 @@ module_platform_driver(cros_usb_pd_charger_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Chrome USB PD charger");
-MODULE_ALIAS("power_supply:cros-usb-pd-charger");
+MODULE_ALIAS("platform:" DRV_NAME);

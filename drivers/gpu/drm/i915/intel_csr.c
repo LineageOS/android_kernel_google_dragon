@@ -188,6 +188,24 @@ static const struct stepping_info *intel_get_stepping_info(struct drm_device *de
 	return NULL;
 }
 
+static void gen9_set_dc_state_debugmask(struct drm_i915_private *dev_priv)
+{
+	uint32_t val, mask;
+
+	mask = DC_STATE_DEBUG_MASK_MEMORY_UP;
+
+	if (IS_BROXTON(dev_priv))
+		mask |= DC_STATE_DEBUG_MASK_CORES;
+
+	/* The below bit doesn't need to be cleared ever afterwards */
+	val = I915_READ(DC_STATE_DEBUG);
+	if ((val & mask) != mask) {
+		val |= mask;
+		I915_WRITE(DC_STATE_DEBUG, val);
+		POSTING_READ(DC_STATE_DEBUG);
+	}
+}
+
 /**
  * intel_csr_load_program() - write the firmware from memory to register.
  * @dev_priv: i915 drm device.
@@ -219,6 +237,10 @@ void intel_csr_load_program(struct drm_i915_private *dev_priv)
 		I915_WRITE(dev_priv->csr.mmioaddr[i],
 			   dev_priv->csr.mmiodata[i]);
 	}
+
+	dev_priv->csr.dc_state = 0;
+
+	gen9_set_dc_state_debugmask(dev_priv);
 }
 
 static uint32_t *parse_csr_fw(struct drm_i915_private *dev_priv,
@@ -367,18 +389,12 @@ static void csr_load_work_fn(struct work_struct *work)
 
 	ret = request_firmware(&fw, dev_priv->csr.fw_path,
 			       &dev_priv->dev->pdev->dev);
-	if (!fw)
-		goto out;
+	if (fw)
+		dev_priv->csr.dmc_payload = parse_csr_fw(dev_priv, fw);
 
-	dev_priv->csr.dmc_payload = parse_csr_fw(dev_priv, fw);
-	if (!dev_priv->csr.dmc_payload)
-		goto out;
-
-	/* load csr program during system boot, as needed for DC states */
-	intel_csr_load_program(dev_priv);
-
-out:
 	if (dev_priv->csr.dmc_payload) {
+		intel_csr_load_program(dev_priv);
+
 		intel_display_power_put(dev_priv, POWER_DOMAIN_INIT);
 
 		DRM_INFO("Finished loading %s (v%u.%u)\n",

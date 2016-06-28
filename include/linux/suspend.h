@@ -194,6 +194,11 @@ struct platform_freeze_ops {
 	void (*end)(void);
 };
 
+struct timed_freeze_ops {
+	int (*enter_freeze)(void *);
+	int (*callback)(void *);
+};
+
 #ifdef CONFIG_SUSPEND
 /**
  * suspend_set_ops - set platform dependent suspend operations
@@ -283,6 +288,14 @@ static inline bool idle_should_freeze(void) { return false; }
 static inline void freeze_set_ops(const struct platform_freeze_ops *ops) {}
 static inline void freeze_wake(void) {}
 #endif /* !CONFIG_SUSPEND */
+
+#ifdef CONFIG_GENERIC_CLOCKEVENTS_BUILD
+extern int timed_freeze(struct timed_freeze_ops *ops, void *data,
+			ktime_t delta);
+#else
+static inline int timed_freeze(struct timed_freeze_ops *ops, void *data,
+			       ktime_t delta) { return -ENOSYS; }
+#endif
 
 /* struct pbe is used for creating lists of pages that should be restored
  * atomically during the resume from disk, because the page frames they have

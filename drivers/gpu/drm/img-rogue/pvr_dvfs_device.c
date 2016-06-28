@@ -169,7 +169,7 @@ static int devfreq_get_dev_status(struct device *dev, struct devfreq_dev_status 
 		return -EAGAIN;
 	}
 
-	stat->busy_time = sGpuUtilStats.ui64GpuStatActiveHigh;
+	stat->busy_time = sGpuUtilStats.ui64GpuStatActiveHigh + sGpuUtilStats.ui64GpuStatActiveLow;
 	stat->total_time = sGpuUtilStats.ui64GpuStatCumulative;
 
 	return 0;
@@ -374,7 +374,7 @@ PVRSRV_ERROR InitDVFS(PVRSRV_DATA *psPVRSRVData, void *hDevice)
 		return eError;
 	}
 
-	err = of_init_opp_table(psDev);
+	err = dev_pm_opp_of_add_table(psDev);
 	if (err) {
 		PVR_DPF((PVR_DBG_ERROR, "Failed to init opp table from devicetree, %d", err));
 		eError = TO_IMG_ERR(err);
@@ -505,7 +505,7 @@ void DeinitDVFS(PVRSRV_DATA *psPVRSRVData, void *hDevice)
 	kfree(img_devfreq_dev_profile.freq_table);
 #endif
 
-	of_free_opp_table(psDev);
+	dev_pm_opp_of_remove_table(psDev);
 
 	RGXUnregisterGpuUtilStats(psDVFSDevice->hGpuUtilUserDVFS);
 	psDVFSDevice->hGpuUtilUserDVFS = NULL;

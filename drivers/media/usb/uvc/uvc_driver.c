@@ -138,9 +138,34 @@ static struct uvc_format_desc uvc_fmts[] = {
 		.fcc		= V4L2_PIX_FMT_RGB565,
 	},
 	{
+		.name		= "BGR 8:8:8 (BGR3)",
+		.guid		= UVC_GUID_FORMAT_BGR3,
+		.fcc		= V4L2_PIX_FMT_BGR24,
+	},
+	{
 		.name		= "H.264",
 		.guid		= UVC_GUID_FORMAT_H264,
 		.fcc		= V4L2_PIX_FMT_H264,
+	},
+	{
+		.name		= "Greyscale 8 L/R (Y8I)",
+		.guid		= UVC_GUID_FORMAT_Y8I,
+		.fcc		= V4L2_PIX_FMT_Y8I,
+	},
+	{
+		.name		= "Greyscale 12 L/R (Y12I)",
+		.guid		= UVC_GUID_FORMAT_Y12I,
+		.fcc		= V4L2_PIX_FMT_Y12I,
+	},
+	{
+		.name		= "Depth data 16-bit (Z16)",
+		.guid		= UVC_GUID_FORMAT_Z16,
+		.fcc		= V4L2_PIX_FMT_Z16,
+	},
+	{
+		.name		= "Bayer 10-bit (SRGGB10P)",
+		.guid		= UVC_GUID_FORMAT_RW10,
+		.fcc		= V4L2_PIX_FMT_SRGGB10P,
 	},
 };
 
@@ -1623,11 +1648,11 @@ static void uvc_delete(struct uvc_device *dev)
 {
 	struct list_head *p, *n;
 
-	usb_put_intf(dev->intf);
-	usb_put_dev(dev->udev);
-
 	uvc_status_cleanup(dev);
 	uvc_ctrl_cleanup_device(dev);
+
+	usb_put_intf(dev->intf);
+	usb_put_dev(dev->udev);
 
 	if (dev->vdev.dev)
 		v4l2_device_unregister(&dev->vdev);
@@ -1718,6 +1743,11 @@ static int uvc_register_video(struct uvc_device *dev,
 	struct video_device *vdev;
 	int ret;
 
+	/* Initialize the video buffers queue. */
+	ret = uvc_queue_init(&stream->queue, stream->type, !uvc_no_drop_param);
+	if (ret)
+		return ret;
+
 	/* Initialize the streaming interface with default streaming
 	 * parameters.
 	 */
@@ -1744,6 +1774,7 @@ static int uvc_register_video(struct uvc_device *dev,
 	 */
 	vdev->v4l2_dev = &dev->vdev;
 	vdev->fops = &uvc_fops;
+	vdev->ioctl_ops = &uvc_ioctl_ops;
 	vdev->release = uvc_release;
 	vdev->prio = &stream->chain->prio;
 	if (stream->type == V4L2_BUF_TYPE_VIDEO_OUTPUT)
@@ -1991,14 +2022,13 @@ static int __uvc_resume(struct usb_interface *intf, int reset)
 {
 	struct uvc_device *dev = usb_get_intfdata(intf);
 	struct uvc_streaming *stream;
+	int ret = 0;
 
 	uvc_trace(UVC_TRACE_SUSPEND, "Resuming interface %u\n",
 		intf->cur_altsetting->desc.bInterfaceNumber);
 
 	if (intf->cur_altsetting->desc.bInterfaceSubClass ==
 	    UVC_SC_VIDEOCONTROL) {
-		int ret = 0;
-
 		if (reset) {
 			ret = uvc_ctrl_restore_values(dev);
 			if (ret < 0)
@@ -2014,8 +2044,13 @@ static int __uvc_resume(struct usb_interface *intf, int reset)
 	}
 
 	list_for_each_entry(stream, &dev->streams, list) {
-		if (stream->intf == intf)
-			return uvc_video_resume(stream, reset);
+		if (stream->intf == intf) {
+			ret = uvc_video_resume(stream, reset);
+			if (ret < 0)
+				uvc_queue_streamoff(&stream->queue,
+						    stream->queue.queue.type);
+			return ret;
+		}
 	}
 
 	uvc_trace(UVC_TRACE_SUSPEND, "Resume: video streaming USB interface "

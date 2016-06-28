@@ -306,35 +306,38 @@ static long dma_buf_ioctl(struct file *file,
 	struct dma_buf *dmabuf;
 	struct dma_buf_sync sync;
 	enum dma_data_direction direction;
+	int ret;
 
 	dmabuf = file->private_data;
-
-	if (!is_dma_buf_file(file))
-		return -EINVAL;
 
 	switch (cmd) {
 	case DMA_BUF_IOCTL_SYNC:
 		if (copy_from_user(&sync, (void __user *) arg, sizeof(sync)))
 			return -EFAULT;
 
-		if (sync.flags & DMA_BUF_SYNC_RW)
-			direction = DMA_BIDIRECTIONAL;
-		else if (sync.flags & DMA_BUF_SYNC_READ)
-			direction = DMA_FROM_DEVICE;
-		else if (sync.flags & DMA_BUF_SYNC_WRITE)
-			direction = DMA_TO_DEVICE;
-		else
-			return -EINVAL;
-
 		if (sync.flags & ~DMA_BUF_SYNC_VALID_FLAGS_MASK)
 			return -EINVAL;
 
-		if (sync.flags & DMA_BUF_SYNC_END)
-			dma_buf_end_cpu_access(dmabuf, direction);
-		else
-			dma_buf_begin_cpu_access(dmabuf, direction);
+		switch (sync.flags & DMA_BUF_SYNC_RW) {
+		case DMA_BUF_SYNC_READ:
+			direction = DMA_FROM_DEVICE;
+			break;
+		case DMA_BUF_SYNC_WRITE:
+			direction = DMA_TO_DEVICE;
+			break;
+		case DMA_BUF_SYNC_RW:
+			direction = DMA_BIDIRECTIONAL;
+			break;
+		default:
+			return -EINVAL;
+		}
 
-		return 0;
+		if (sync.flags & DMA_BUF_SYNC_END)
+			ret = dma_buf_end_cpu_access(dmabuf, direction);
+		else
+			ret = dma_buf_begin_cpu_access(dmabuf, direction);
+
+		return ret;
 	default:
 		return -ENOTTY;
 	}
@@ -654,13 +657,17 @@ EXPORT_SYMBOL_GPL(dma_buf_begin_cpu_access);
  *
  * This call must always succeed.
  */
-void dma_buf_end_cpu_access(struct dma_buf *dmabuf,
-			    enum dma_data_direction direction)
+int dma_buf_end_cpu_access(struct dma_buf *dmabuf,
+			   enum dma_data_direction direction)
 {
+	int ret = 0;
+
 	WARN_ON(!dmabuf);
 
 	if (dmabuf->ops->end_cpu_access)
-		dmabuf->ops->end_cpu_access(dmabuf, direction);
+		ret = dmabuf->ops->end_cpu_access(dmabuf, direction);
+
+	return ret;
 }
 EXPORT_SYMBOL_GPL(dma_buf_end_cpu_access);
 

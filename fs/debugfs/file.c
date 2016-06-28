@@ -53,6 +53,22 @@ const struct inode_operations debugfs_link_operations = {
 	.follow_link    = debugfs_follow_link,
 };
 
+static struct dentry *debugfs_create_mode(const char *name, umode_t mode,
+					  struct dentry *parent, void *value,
+				          const struct file_operations *fops,
+				          const struct file_operations *fops_ro,
+				          const struct file_operations *fops_wo)
+{
+	/* if there are no write bits set, make read only */
+	if (!(mode & S_IWUGO))
+		return debugfs_create_file(name, mode, parent, value, fops_ro);
+	/* if there are no read bits set, make write only */
+	if (!(mode & S_IRUGO))
+		return debugfs_create_file(name, mode, parent, value, fops_wo);
+
+	return debugfs_create_file(name, mode, parent, value, fops);
+}
+
 static int debugfs_u8_set(void *data, u64 val)
 {
 	*(u8 *)data = val;
@@ -94,14 +110,8 @@ DEFINE_SIMPLE_ATTRIBUTE(fops_u8_wo, NULL, debugfs_u8_set, "%llu\n");
 struct dentry *debugfs_create_u8(const char *name, umode_t mode,
 				 struct dentry *parent, u8 *value)
 {
-	/* if there are no write bits set, make read only */
-	if (!(mode & S_IWUGO))
-		return debugfs_create_file(name, mode, parent, value, &fops_u8_ro);
-	/* if there are no read bits set, make write only */
-	if (!(mode & S_IRUGO))
-		return debugfs_create_file(name, mode, parent, value, &fops_u8_wo);
-
-	return debugfs_create_file(name, mode, parent, value, &fops_u8);
+	return debugfs_create_mode(name, mode, parent, value, &fops_u8,
+				   &fops_u8_ro, &fops_u8_wo);
 }
 EXPORT_SYMBOL_GPL(debugfs_create_u8);
 
@@ -146,14 +156,8 @@ DEFINE_SIMPLE_ATTRIBUTE(fops_u16_wo, NULL, debugfs_u16_set, "%llu\n");
 struct dentry *debugfs_create_u16(const char *name, umode_t mode,
 				  struct dentry *parent, u16 *value)
 {
-	/* if there are no write bits set, make read only */
-	if (!(mode & S_IWUGO))
-		return debugfs_create_file(name, mode, parent, value, &fops_u16_ro);
-	/* if there are no read bits set, make write only */
-	if (!(mode & S_IRUGO))
-		return debugfs_create_file(name, mode, parent, value, &fops_u16_wo);
-
-	return debugfs_create_file(name, mode, parent, value, &fops_u16);
+	return debugfs_create_mode(name, mode, parent, value, &fops_u16,
+				   &fops_u16_ro, &fops_u16_wo);
 }
 EXPORT_SYMBOL_GPL(debugfs_create_u16);
 
@@ -198,14 +202,8 @@ DEFINE_SIMPLE_ATTRIBUTE(fops_u32_wo, NULL, debugfs_u32_set, "%llu\n");
 struct dentry *debugfs_create_u32(const char *name, umode_t mode,
 				 struct dentry *parent, u32 *value)
 {
-	/* if there are no write bits set, make read only */
-	if (!(mode & S_IWUGO))
-		return debugfs_create_file(name, mode, parent, value, &fops_u32_ro);
-	/* if there are no read bits set, make write only */
-	if (!(mode & S_IRUGO))
-		return debugfs_create_file(name, mode, parent, value, &fops_u32_wo);
-
-	return debugfs_create_file(name, mode, parent, value, &fops_u32);
+	return debugfs_create_mode(name, mode, parent, value, &fops_u32,
+				   &fops_u32_ro, &fops_u32_wo);
 }
 EXPORT_SYMBOL_GPL(debugfs_create_u32);
 
@@ -251,16 +249,58 @@ DEFINE_SIMPLE_ATTRIBUTE(fops_u64_wo, NULL, debugfs_u64_set, "%llu\n");
 struct dentry *debugfs_create_u64(const char *name, umode_t mode,
 				 struct dentry *parent, u64 *value)
 {
-	/* if there are no write bits set, make read only */
-	if (!(mode & S_IWUGO))
-		return debugfs_create_file(name, mode, parent, value, &fops_u64_ro);
-	/* if there are no read bits set, make write only */
-	if (!(mode & S_IRUGO))
-		return debugfs_create_file(name, mode, parent, value, &fops_u64_wo);
-
-	return debugfs_create_file(name, mode, parent, value, &fops_u64);
+	return debugfs_create_mode(name, mode, parent, value, &fops_u64,
+				   &fops_u64_ro, &fops_u64_wo);
 }
 EXPORT_SYMBOL_GPL(debugfs_create_u64);
+
+static int debugfs_ulong_set(void *data, u64 val)
+{
+	*(unsigned long *)data = val;
+	return 0;
+}
+
+static int debugfs_ulong_get(void *data, u64 *val)
+{
+	*val = *(unsigned long *)data;
+	return 0;
+}
+DEFINE_SIMPLE_ATTRIBUTE(fops_ulong, debugfs_ulong_get, debugfs_ulong_set, "%llu\n");
+DEFINE_SIMPLE_ATTRIBUTE(fops_ulong_ro, debugfs_ulong_get, NULL, "%llu\n");
+DEFINE_SIMPLE_ATTRIBUTE(fops_ulong_wo, NULL, debugfs_ulong_set, "%llu\n");
+
+/**
+ * debugfs_create_ulong - create a debugfs file that is used to read and write
+ * an unsigned long value.
+ * @name: a pointer to a string containing the name of the file to create.
+ * @mode: the permission that the file should have
+ * @parent: a pointer to the parent dentry for this file.  This should be a
+ *          directory dentry if set.  If this parameter is %NULL, then the
+ *          file will be created in the root of the debugfs filesystem.
+ * @value: a pointer to the variable that the file should read to and write
+ *         from.
+ *
+ * This function creates a file in debugfs with the given name that
+ * contains the value of the variable @value.  If the @mode variable is so
+ * set, it can be read from, and written to.
+ *
+ * This function will return a pointer to a dentry if it succeeds.  This
+ * pointer must be passed to the debugfs_remove() function when the file is
+ * to be removed (no automatic cleanup happens if your module is unloaded,
+ * you are responsible here.)  If an error occurs, %NULL will be returned.
+ *
+ * If debugfs is not enabled in the kernel, the value -%ENODEV will be
+ * returned.  It is not wise to check for this value, but rather, check for
+ * %NULL or !%NULL instead as to eliminate the need for #ifdef in the calling
+ * code.
+ */
+struct dentry *debugfs_create_ulong(const char *name, umode_t mode,
+				    struct dentry *parent, unsigned long *value)
+{
+	return debugfs_create_mode(name, mode, parent, value, &fops_ulong,
+				   &fops_ulong_ro, &fops_ulong_wo);
+}
+EXPORT_SYMBOL_GPL(debugfs_create_ulong);
 
 DEFINE_SIMPLE_ATTRIBUTE(fops_x8, debugfs_u8_get, debugfs_u8_set, "0x%02llx\n");
 DEFINE_SIMPLE_ATTRIBUTE(fops_x8_ro, debugfs_u8_get, NULL, "0x%02llx\n");
@@ -297,14 +337,8 @@ DEFINE_SIMPLE_ATTRIBUTE(fops_x64, debugfs_u64_get, debugfs_u64_set, "0x%016llx\n
 struct dentry *debugfs_create_x8(const char *name, umode_t mode,
 				 struct dentry *parent, u8 *value)
 {
-	/* if there are no write bits set, make read only */
-	if (!(mode & S_IWUGO))
-		return debugfs_create_file(name, mode, parent, value, &fops_x8_ro);
-	/* if there are no read bits set, make write only */
-	if (!(mode & S_IRUGO))
-		return debugfs_create_file(name, mode, parent, value, &fops_x8_wo);
-
-	return debugfs_create_file(name, mode, parent, value, &fops_x8);
+	return debugfs_create_mode(name, mode, parent, value, &fops_x8,
+				   &fops_x8_ro, &fops_x8_wo);
 }
 EXPORT_SYMBOL_GPL(debugfs_create_x8);
 
@@ -321,14 +355,8 @@ EXPORT_SYMBOL_GPL(debugfs_create_x8);
 struct dentry *debugfs_create_x16(const char *name, umode_t mode,
 				 struct dentry *parent, u16 *value)
 {
-	/* if there are no write bits set, make read only */
-	if (!(mode & S_IWUGO))
-		return debugfs_create_file(name, mode, parent, value, &fops_x16_ro);
-	/* if there are no read bits set, make write only */
-	if (!(mode & S_IRUGO))
-		return debugfs_create_file(name, mode, parent, value, &fops_x16_wo);
-
-	return debugfs_create_file(name, mode, parent, value, &fops_x16);
+	return debugfs_create_mode(name, mode, parent, value, &fops_x16,
+				   &fops_x16_ro, &fops_x16_wo);
 }
 EXPORT_SYMBOL_GPL(debugfs_create_x16);
 
@@ -345,14 +373,8 @@ EXPORT_SYMBOL_GPL(debugfs_create_x16);
 struct dentry *debugfs_create_x32(const char *name, umode_t mode,
 				 struct dentry *parent, u32 *value)
 {
-	/* if there are no write bits set, make read only */
-	if (!(mode & S_IWUGO))
-		return debugfs_create_file(name, mode, parent, value, &fops_x32_ro);
-	/* if there are no read bits set, make write only */
-	if (!(mode & S_IRUGO))
-		return debugfs_create_file(name, mode, parent, value, &fops_x32_wo);
-
-	return debugfs_create_file(name, mode, parent, value, &fops_x32);
+	return debugfs_create_mode(name, mode, parent, value, &fops_x32,
+				   &fops_x32_ro, &fops_x32_wo);
 }
 EXPORT_SYMBOL_GPL(debugfs_create_x32);
 
@@ -433,16 +455,8 @@ DEFINE_SIMPLE_ATTRIBUTE(fops_atomic_t_wo, NULL, debugfs_atomic_t_set, "%lld\n");
 struct dentry *debugfs_create_atomic_t(const char *name, umode_t mode,
 				 struct dentry *parent, atomic_t *value)
 {
-	/* if there are no write bits set, make read only */
-	if (!(mode & S_IWUGO))
-		return debugfs_create_file(name, mode, parent, value,
-					&fops_atomic_t_ro);
-	/* if there are no read bits set, make write only */
-	if (!(mode & S_IRUGO))
-		return debugfs_create_file(name, mode, parent, value,
-					&fops_atomic_t_wo);
-
-	return debugfs_create_file(name, mode, parent, value, &fops_atomic_t);
+	return debugfs_create_mode(name, mode, parent, value, &fops_atomic_t,
+				   &fops_atomic_t_ro, &fops_atomic_t_wo);
 }
 EXPORT_SYMBOL_GPL(debugfs_create_atomic_t);
 
@@ -450,7 +464,7 @@ static ssize_t read_file_bool(struct file *file, char __user *user_buf,
 			      size_t count, loff_t *ppos)
 {
 	char buf[3];
-	u32 *val = file->private_data;
+	bool *val = file->private_data;
 
 	if (*val)
 		buf[0] = 'Y';
@@ -467,7 +481,7 @@ static ssize_t write_file_bool(struct file *file, const char __user *user_buf,
 	char buf[32];
 	size_t buf_size;
 	bool bv;
-	u32 *val = file->private_data;
+	bool *val = file->private_data;
 
 	buf_size = min(count, (sizeof(buf)-1));
 	if (copy_from_user(buf, user_buf, buf_size))
@@ -512,7 +526,7 @@ static const struct file_operations fops_bool = {
  * code.
  */
 struct dentry *debugfs_create_bool(const char *name, umode_t mode,
-				   struct dentry *parent, u32 *value)
+				   struct dentry *parent, bool *value)
 {
 	return debugfs_create_file(name, mode, parent, value, &fops_bool);
 }

@@ -43,9 +43,10 @@
 #include "drm_crtc_internal.h"
 #include "drm_internal.h"
 
-static struct drm_framebuffer *add_framebuffer_internal(struct drm_device *dev,
-							struct drm_mode_fb_cmd2 *r,
-							struct drm_file *file_priv);
+static struct drm_framebuffer *
+internal_framebuffer_create(struct drm_device *dev,
+			    const struct drm_mode_fb_cmd2 *r,
+			    struct drm_file *file_priv);
 
 /* Avoid boilerplate.  I'm tired of typing. */
 #define DRM_ENUM_NAME_FN(fnname, list)				\
@@ -533,17 +534,6 @@ void drm_framebuffer_reference(struct drm_framebuffer *fb)
 }
 EXPORT_SYMBOL(drm_framebuffer_reference);
 
-static void drm_framebuffer_free_bug(struct kref *kref)
-{
-	BUG();
-}
-
-static void __drm_framebuffer_unreference(struct drm_framebuffer *fb)
-{
-	DRM_DEBUG("%p: FB ID: %d (%d)\n", fb, fb->base.id, atomic_read(&fb->refcount.refcount));
-	kref_put(&fb->refcount, drm_framebuffer_free_bug);
-}
-
 /**
  * drm_framebuffer_unregister_private - unregister a private fb from the lookup idr
  * @fb: fb to unregister
@@ -665,6 +655,7 @@ DEFINE_WW_CLASS(crtc_ww_class);
  * @primary: Primary plane for CRTC
  * @cursor: Cursor plane for CRTC
  * @funcs: callbacks for the new CRTC
+ * @name: printf style format string for the CRTC name, or NULL for default name
  *
  * Inits a new object created as base part of a driver crtc object.
  *
@@ -674,7 +665,8 @@ DEFINE_WW_CLASS(crtc_ww_class);
 int drm_crtc_init_with_planes(struct drm_device *dev, struct drm_crtc *crtc,
 			      struct drm_plane *primary,
 			      struct drm_plane *cursor,
-			      const struct drm_crtc_funcs *funcs)
+			      const struct drm_crtc_funcs *funcs,
+			      const char *name, ...)
 {
 	struct drm_mode_config *config = &dev->mode_config;
 	int ret;
@@ -1016,25 +1008,65 @@ void drm_connector_unregister(struct drm_connector *connector)
 }
 EXPORT_SYMBOL(drm_connector_unregister);
 
-
 /**
- * drm_connector_unplug_all - unregister connector userspace interfaces
+ * drm_connector_register_all - register all connectors
  * @dev: drm device
  *
- * This function unregisters all connector userspace interfaces in sysfs. Should
- * be call when the device is disconnected, e.g. from an usb driver's
- * ->disconnect callback.
+ * This function registers all connectors in sysfs and other places so that
+ * userspace can start to access them. Drivers can call it after calling
+ * drm_dev_register() to complete the device registration, if they don't call
+ * drm_connector_register() on each connector individually.
+ *
+ * When a device is unplugged and should be removed from userspace access,
+ * call drm_connector_unregister_all(), which is the inverse of this
+ * function.
+ *
+ * Returns:
+ * Zero on success, error code on failure.
  */
-void drm_connector_unplug_all(struct drm_device *dev)
+int drm_connector_register_all(struct drm_device *dev)
+{
+	struct drm_connector *connector;
+	int ret;
+
+	mutex_lock(&dev->mode_config.mutex);
+
+	drm_for_each_connector(connector, dev) {
+		ret = drm_connector_register(connector);
+		if (ret)
+			goto err;
+	}
+
+	mutex_unlock(&dev->mode_config.mutex);
+
+	return 0;
+
+err:
+	mutex_unlock(&dev->mode_config.mutex);
+	drm_connector_unregister_all(dev);
+	return ret;
+}
+EXPORT_SYMBOL(drm_connector_register_all);
+
+/**
+ * drm_connector_unregister_all - unregister connector userspace interfaces
+ * @dev: drm device
+ *
+ * This functions unregisters all connectors from sysfs and other places so
+ * that userspace can no longer access them. Drivers should call this as the
+ * first step tearing down the device instace, or when the underlying
+ * physical device disappeared (e.g. USB unplug), right before calling
+ * drm_dev_unregister().
+ */
+void drm_connector_unregister_all(struct drm_device *dev)
 {
 	struct drm_connector *connector;
 
 	/* FIXME: taking the mode config mutex ends up in a clash with sysfs */
 	list_for_each_entry(connector, &dev->mode_config.connector_list, head)
 		drm_connector_unregister(connector);
-
 }
-EXPORT_SYMBOL(drm_connector_unplug_all);
+EXPORT_SYMBOL(drm_connector_unregister_all);
 
 /**
  * drm_encoder_init - Init a preallocated encoder
@@ -1042,6 +1074,7 @@ EXPORT_SYMBOL(drm_connector_unplug_all);
  * @encoder: the encoder to init
  * @funcs: callbacks for this encoder
  * @encoder_type: user visible type of the encoder
+ * @name: printf style format string for the encoder name, or NULL for default name
  *
  * Initialises a preallocated encoder. Encoder should be
  * subclassed as part of driver encoder objects.
@@ -1052,7 +1085,7 @@ EXPORT_SYMBOL(drm_connector_unplug_all);
 int drm_encoder_init(struct drm_device *dev,
 		      struct drm_encoder *encoder,
 		      const struct drm_encoder_funcs *funcs,
-		      int encoder_type)
+		      int encoder_type, const char *name, ...)
 {
 	int ret;
 
@@ -1116,6 +1149,7 @@ EXPORT_SYMBOL(drm_encoder_cleanup);
  * @formats: array of supported formats (%DRM_FORMAT_*)
  * @format_count: number of elements in @formats
  * @type: type of plane (overlay, primary, cursor)
+ * @name: printf style format string for the plane name, or NULL for default name
  *
  * Initializes a plane object of type @type.
  *
@@ -1125,8 +1159,9 @@ EXPORT_SYMBOL(drm_encoder_cleanup);
 int drm_universal_plane_init(struct drm_device *dev, struct drm_plane *plane,
 			     unsigned long possible_crtcs,
 			     const struct drm_plane_funcs *funcs,
-			     const uint32_t *formats, uint32_t format_count,
-			     enum drm_plane_type type)
+			     const uint32_t *formats, unsigned int format_count,
+			     enum drm_plane_type type,
+			     const char *name, ...)
 {
 	struct drm_mode_config *config = &dev->mode_config;
 	int ret;
@@ -1199,14 +1234,14 @@ EXPORT_SYMBOL(drm_universal_plane_init);
 int drm_plane_init(struct drm_device *dev, struct drm_plane *plane,
 		   unsigned long possible_crtcs,
 		   const struct drm_plane_funcs *funcs,
-		   const uint32_t *formats, uint32_t format_count,
+		   const uint32_t *formats, unsigned int format_count,
 		   bool is_primary)
 {
 	enum drm_plane_type type;
 
 	type = is_primary ? DRM_PLANE_TYPE_PRIMARY : DRM_PLANE_TYPE_OVERLAY;
 	return drm_universal_plane_init(dev, plane, possible_crtcs, funcs,
-					formats, format_count, type);
+					formats, format_count, type, NULL);
 }
 EXPORT_SYMBOL(drm_plane_init);
 
@@ -1312,7 +1347,7 @@ void drm_plane_force_disable(struct drm_plane *plane)
 		return;
 	}
 	/* disconnect the plane from the fb and crtc: */
-	__drm_framebuffer_unreference(plane->old_fb);
+	drm_framebuffer_unreference(plane->old_fb);
 	plane->old_fb = NULL;
 	plane->fb = NULL;
 	plane->crtc = NULL;
@@ -1428,6 +1463,41 @@ static int drm_mode_create_standard_properties(struct drm_device *dev)
 	if (!prop)
 		return -ENOMEM;
 	dev->mode_config.prop_mode_id = prop;
+
+	prop = drm_property_create(dev,
+			DRM_MODE_PROP_BLOB,
+			"DEGAMMA_LUT", 0);
+	if (!prop)
+		return -ENOMEM;
+	dev->mode_config.degamma_lut_property = prop;
+
+	prop = drm_property_create_range(dev,
+			DRM_MODE_PROP_IMMUTABLE,
+			"DEGAMMA_LUT_SIZE", 0, UINT_MAX);
+	if (!prop)
+		return -ENOMEM;
+	dev->mode_config.degamma_lut_size_property = prop;
+
+	prop = drm_property_create(dev,
+			DRM_MODE_PROP_BLOB,
+			"CTM", 0);
+	if (!prop)
+		return -ENOMEM;
+	dev->mode_config.ctm_property = prop;
+
+	prop = drm_property_create(dev,
+			DRM_MODE_PROP_BLOB,
+			"GAMMA_LUT", 0);
+	if (!prop)
+		return -ENOMEM;
+	dev->mode_config.gamma_lut_property = prop;
+
+	prop = drm_property_create_range(dev,
+			DRM_MODE_PROP_IMMUTABLE,
+			"GAMMA_LUT_SIZE", 0, UINT_MAX);
+	if (!prop)
+		return -ENOMEM;
+	dev->mode_config.gamma_lut_size_property = prop;
 
 	return 0;
 }
@@ -2226,6 +2296,27 @@ int drm_mode_getplane(struct drm_device *dev, void *data,
 	return 0;
 }
 
+/**
+ * drm_plane_check_pixel_format - Check if the plane supports the pixel format
+ * @plane: plane to check for format support
+ * @format: the pixel format
+ *
+ * Returns:
+ * Zero of @plane has @format in its list of supported pixel formats, -EINVAL
+ * otherwise.
+ */
+int drm_plane_check_pixel_format(const struct drm_plane *plane, u32 format)
+{
+	unsigned int i;
+
+	for (i = 0; i < plane->format_count; i++) {
+		if (format == plane->format_types[i])
+			return 0;
+	}
+
+	return -EINVAL;
+}
+
 /*
  * setplane_internal - setplane handler for internal callers
  *
@@ -2246,7 +2337,6 @@ static int __setplane_internal(struct drm_plane *plane,
 {
 	int ret = 0;
 	unsigned int fb_width, fb_height;
-	unsigned int i;
 
 	/* No fb means shut it down */
 	if (!fb) {
@@ -2269,13 +2359,10 @@ static int __setplane_internal(struct drm_plane *plane,
 	}
 
 	/* Check whether this plane supports the fb pixel format. */
-	for (i = 0; i < plane->format_count; i++)
-		if (fb->pixel_format == plane->format_types[i])
-			break;
-	if (i == plane->format_count) {
+	ret = drm_plane_check_pixel_format(plane, fb->pixel_format);
+	if (ret) {
 		DRM_DEBUG_KMS("Invalid pixel format %s\n",
 			      drm_get_format_name(fb->pixel_format));
-		ret = -EINVAL;
 		goto out;
 	}
 
@@ -2607,6 +2694,23 @@ int drm_mode_setcrtc(struct drm_device *dev, void *data,
 
 		drm_mode_set_crtcinfo(mode, CRTC_INTERLACE_HALVE_V);
 
+		/*
+		 * Check whether the primary plane supports the fb pixel format.
+		 * Drivers not implementing the universal planes API use a
+		 * default formats list provided by the DRM core which doesn't
+		 * match real hardware capabilities. Skip the check in that
+		 * case.
+		 */
+		if (!crtc->primary->format_default) {
+			ret = drm_plane_check_pixel_format(crtc->primary,
+							   fb->pixel_format);
+			if (ret) {
+				DRM_DEBUG_KMS("Invalid pixel format %s\n",
+					drm_get_format_name(fb->pixel_format));
+				goto out;
+			}
+		}
+
 		ret = drm_crtc_check_viewport(crtc, crtc_req->x, crtc_req->y,
 					      mode, fb);
 		if (ret)
@@ -2732,13 +2836,11 @@ static int drm_mode_cursor_universal(struct drm_crtc *crtc,
 	 */
 	if (req->flags & DRM_MODE_CURSOR_BO) {
 		if (req->handle) {
-			fb = add_framebuffer_internal(dev, &fbreq, file_priv);
+			fb = internal_framebuffer_create(dev, &fbreq, file_priv);
 			if (IS_ERR(fb)) {
 				DRM_DEBUG_KMS("failed to wrap cursor buffer in drm framebuffer\n");
 				return PTR_ERR(fb);
 			}
-
-			drm_framebuffer_reference(fb);
 		} else {
 			fb = NULL;
 		}
@@ -3096,9 +3198,10 @@ static int framebuffer_check(const struct drm_mode_fb_cmd2 *r)
 	return 0;
 }
 
-static struct drm_framebuffer *add_framebuffer_internal(struct drm_device *dev,
-							struct drm_mode_fb_cmd2 *r,
-							struct drm_file *file_priv)
+static struct drm_framebuffer *
+internal_framebuffer_create(struct drm_device *dev,
+			    const struct drm_mode_fb_cmd2 *r,
+			    struct drm_file *file_priv)
 {
 	struct drm_mode_config *config = &dev->mode_config;
 	struct drm_framebuffer *fb;
@@ -3136,12 +3239,6 @@ static struct drm_framebuffer *add_framebuffer_internal(struct drm_device *dev,
 		return fb;
 	}
 
-	mutex_lock(&file_priv->fbs_lock);
-	r->fb_id = fb->base.id;
-	list_add(&fb->filp_head, &file_priv->fbs);
-	DRM_DEBUG_KMS("[FB:%d]\n", fb->base.id);
-	mutex_unlock(&file_priv->fbs_lock);
-
 	return fb;
 }
 
@@ -3163,14 +3260,23 @@ static struct drm_framebuffer *add_framebuffer_internal(struct drm_device *dev,
 int drm_mode_addfb2(struct drm_device *dev,
 		    void *data, struct drm_file *file_priv)
 {
+	struct drm_mode_fb_cmd2 *r = data;
 	struct drm_framebuffer *fb;
 
 	if (!drm_core_check_feature(dev, DRIVER_MODESET))
 		return -EINVAL;
 
-	fb = add_framebuffer_internal(dev, data, file_priv);
+	fb = internal_framebuffer_create(dev, r, file_priv);
 	if (IS_ERR(fb))
 		return PTR_ERR(fb);
+
+	/* Transfer ownership to the filp for reaping on close */
+
+	DRM_DEBUG_KMS("[FB:%d]\n", fb->base.id);
+	mutex_lock(&file_priv->fbs_lock);
+	r->fb_id = fb->base.id;
+	list_add(&fb->filp_head, &file_priv->fbs);
+	mutex_unlock(&file_priv->fbs_lock);
 
 	return 0;
 }

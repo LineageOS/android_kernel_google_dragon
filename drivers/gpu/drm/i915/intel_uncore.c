@@ -63,13 +63,6 @@ intel_uncore_forcewake_domain_to_str(const enum forcewake_domain_id id)
 	return "unknown";
 }
 
-static void
-assert_device_not_suspended(struct drm_i915_private *dev_priv)
-{
-	WARN_ONCE(HAS_RUNTIME_PM(dev_priv->dev) && dev_priv->pm.suspended,
-		  "Device suspended\n");
-}
-
 static inline void
 fw_domain_reset(const struct intel_uncore_forcewake_domain *d)
 {
@@ -249,7 +242,7 @@ static void intel_uncore_fw_release_timer(unsigned long arg)
 	struct intel_uncore_forcewake_domain *domain = (void *)arg;
 	unsigned long irqflags;
 
-	assert_device_not_suspended(domain->i915);
+	assert_rpm_device_not_suspended(domain->i915);
 
 	spin_lock_irqsave(&domain->i915->uncore.lock, irqflags);
 	if (WARN_ON(domain->wake_count == 0))
@@ -424,7 +417,7 @@ void intel_uncore_forcewake_get(struct drm_i915_private *dev_priv,
 	if (!dev_priv->uncore.funcs.force_wake_get)
 		return;
 
-	WARN_ON(dev_priv->pm.suspended);
+	assert_rpm_wakelock_held(dev_priv);
 
 	spin_lock_irqsave(&dev_priv->uncore.lock, irqflags);
 	__intel_uncore_forcewake_get(dev_priv, fw_domains);
@@ -642,7 +635,7 @@ hsw_unclaimed_reg_detect(struct drm_i915_private *dev_priv)
 
 #define GEN2_READ_HEADER(x) \
 	u##x val = 0; \
-	assert_device_not_suspended(dev_priv);
+	assert_rpm_wakelock_held(dev_priv);
 
 #define GEN2_READ_FOOTER \
 	trace_i915_reg_rw(false, reg, val, sizeof(val), trace); \
@@ -683,7 +676,7 @@ __gen2_read(64)
 #define GEN6_READ_HEADER(x) \
 	unsigned long irqflags; \
 	u##x val = 0; \
-	assert_device_not_suspended(dev_priv); \
+	assert_rpm_wakelock_held(dev_priv); \
 	spin_lock_irqsave(&dev_priv->uncore.lock, irqflags)
 
 #define GEN6_READ_FOOTER \
@@ -713,14 +706,6 @@ static inline void __force_wake_get(struct drm_i915_private *dev_priv,
 
 	if (fw_domains)
 		dev_priv->uncore.funcs.force_wake_get(dev_priv, fw_domains);
-}
-
-#define __vgpu_read(x) \
-static u##x \
-vgpu_read##x(struct drm_i915_private *dev_priv, off_t reg, bool trace) { \
-	GEN6_READ_HEADER(x); \
-	val = __raw_i915_read##x(dev_priv, reg); \
-	GEN6_READ_FOOTER; \
 }
 
 #define __gen6_read(x) \
@@ -786,10 +771,6 @@ gen9_read##x(struct drm_i915_private *dev_priv, off_t reg, bool trace) { \
 	GEN6_READ_FOOTER; \
 }
 
-__vgpu_read(8)
-__vgpu_read(16)
-__vgpu_read(32)
-__vgpu_read(64)
 __gen9_read(8)
 __gen9_read(16)
 __gen9_read(32)
@@ -811,13 +792,40 @@ __gen6_read(64)
 #undef __chv_read
 #undef __vlv_read
 #undef __gen6_read
-#undef __vgpu_read
 #undef GEN6_READ_FOOTER
 #undef GEN6_READ_HEADER
 
+#define VGPU_READ_HEADER(x) \
+	unsigned long irqflags; \
+	u##x val = 0; \
+	assert_rpm_device_not_suspended(dev_priv); \
+	spin_lock_irqsave(&dev_priv->uncore.lock, irqflags)
+
+#define VGPU_READ_FOOTER \
+	spin_unlock_irqrestore(&dev_priv->uncore.lock, irqflags); \
+	trace_i915_reg_rw(false, reg, val, sizeof(val), trace); \
+	return val
+
+#define __vgpu_read(x) \
+static u##x \
+vgpu_read##x(struct drm_i915_private *dev_priv, off_t reg, bool trace) { \
+	VGPU_READ_HEADER(x); \
+	val = __raw_i915_read##x(dev_priv, reg); \
+	VGPU_READ_FOOTER; \
+}
+
+__vgpu_read(8)
+__vgpu_read(16)
+__vgpu_read(32)
+__vgpu_read(64)
+
+#undef __vgpu_read
+#undef VGPU_READ_FOOTER
+#undef VGPU_READ_HEADER
+
 #define GEN2_WRITE_HEADER \
 	trace_i915_reg_rw(true, reg, val, sizeof(val), trace); \
-	assert_device_not_suspended(dev_priv); \
+	assert_rpm_wakelock_held(dev_priv); \
 
 #define GEN2_WRITE_FOOTER
 
@@ -856,7 +864,7 @@ __gen2_write(64)
 #define GEN6_WRITE_HEADER \
 	unsigned long irqflags; \
 	trace_i915_reg_rw(true, reg, val, sizeof(val), trace); \
-	assert_device_not_suspended(dev_priv); \
+	assert_rpm_wakelock_held(dev_priv); \
 	spin_lock_irqsave(&dev_priv->uncore.lock, irqflags)
 
 #define GEN6_WRITE_FOOTER \
@@ -892,14 +900,6 @@ hsw_write##x(struct drm_i915_private *dev_priv, off_t reg, u##x val, bool trace)
 	} \
 	hsw_unclaimed_reg_debug(dev_priv, reg, false, false); \
 	hsw_unclaimed_reg_detect(dev_priv); \
-	GEN6_WRITE_FOOTER; \
-}
-
-#define __vgpu_write(x) \
-static void vgpu_write##x(struct drm_i915_private *dev_priv, \
-			  off_t reg, u##x val, bool trace) { \
-	GEN6_WRITE_HEADER; \
-	__raw_i915_write##x(dev_priv, reg, val); \
 	GEN6_WRITE_FOOTER; \
 }
 
@@ -1020,19 +1020,40 @@ __gen6_write(8)
 __gen6_write(16)
 __gen6_write(32)
 __gen6_write(64)
-__vgpu_write(8)
-__vgpu_write(16)
-__vgpu_write(32)
-__vgpu_write(64)
 
 #undef __gen9_write
 #undef __chv_write
 #undef __gen8_write
 #undef __hsw_write
 #undef __gen6_write
-#undef __vgpu_write
 #undef GEN6_WRITE_FOOTER
 #undef GEN6_WRITE_HEADER
+
+#define VGPU_WRITE_HEADER \
+	unsigned long irqflags; \
+	trace_i915_reg_rw(true, reg, val, sizeof(val), trace); \
+	assert_rpm_device_not_suspended(dev_priv); \
+	spin_lock_irqsave(&dev_priv->uncore.lock, irqflags)
+
+#define VGPU_WRITE_FOOTER \
+	spin_unlock_irqrestore(&dev_priv->uncore.lock, irqflags)
+
+#define __vgpu_write(x) \
+static void vgpu_write##x(struct drm_i915_private *dev_priv, \
+			  off_t reg, u##x val, bool trace) { \
+	VGPU_WRITE_HEADER; \
+	__raw_i915_write##x(dev_priv, reg, val); \
+	VGPU_WRITE_FOOTER; \
+}
+
+__vgpu_write(8)
+__vgpu_write(16)
+__vgpu_write(32)
+__vgpu_write(64)
+
+#undef __vgpu_write
+#undef VGPU_WRITE_FOOTER
+#undef VGPU_WRITE_HEADER
 
 #define ASSIGN_WRITE_MMIO_VFUNCS(x) \
 do { \

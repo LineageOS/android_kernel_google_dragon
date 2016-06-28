@@ -57,7 +57,7 @@ static uint8_t get_max_exp(s8 max_index, u16 max_magnitude, size_t bin_len,
 }
 
 int ath10k_spectral_process_fft(struct ath10k *ar,
-				const struct wmi_phyerr *phyerr,
+				struct wmi_phyerr_ev_arg *phyerr,
 				const struct phyerr_fft_report *fftr,
 				size_t bin_len, u64 tsf)
 {
@@ -73,8 +73,26 @@ int ath10k_spectral_process_fft(struct ath10k *ar,
 	if (bin_len < 64 || bin_len > SPECTRAL_ATH10K_MAX_NUM_BINS)
 		return -EINVAL;
 
+	/* qca99x0 reports bin size as 68 bytes (64 bytes + 4 bytes) in
+	 * report mode 2. First 64 bytes carries inband tones (-32 to +31)
+	 * and last 4 byte carries band edge detection data (+32) mainly
+	 * used in radar detection purpose. Strip last 4 byte to make bin
+	 * size is valid one.
+	 */
+	if (bin_len == 68)
+		bin_len -= 4;
+
 	reg0 = __le32_to_cpu(fftr->reg0);
 	reg1 = __le32_to_cpu(fftr->reg1);
+
+	spin_lock_bh(&ar->data_lock);
+	if (phyerr->phy_err_code == PHY_ERROR_SPECTRAL_SCAN) {
+		if (phyerr->rsvd0 & PHYERR_FLAG_INTERFRC_5G)
+			ar->spectral.interfrc_5g++;
+		if (phyerr->rsvd0 & PHYERR_FLAG_INTERFRC_2G)
+			ar->spectral.interfrc_2g++;
+	}
+	spin_unlock_bh(&ar->data_lock);
 
 	length = sizeof(*fft_sample) - sizeof(struct fft_sample_tlv) + bin_len;
 	fft_sample->tlv.type = ATH_FFT_SAMPLE_ATH10K;
@@ -118,15 +136,14 @@ int ath10k_spectral_process_fft(struct ath10k *ar,
 	fft_sample->total_gain_db = __cpu_to_be16(total_gain_db);
 	fft_sample->base_pwr_db = __cpu_to_be16(base_pwr_db);
 
-	freq1 = __le16_to_cpu(phyerr->freq1);
-	freq2 = __le16_to_cpu(phyerr->freq2);
+	freq1 = phyerr->freq1;
+	freq2 = phyerr->freq2;
 	fft_sample->freq1 = __cpu_to_be16(freq1);
 	fft_sample->freq2 = __cpu_to_be16(freq2);
 
 	chain_idx = MS(reg0, SEARCH_FFT_REPORT_REG0_FFT_CHN_IDX);
 
-	fft_sample->noise = __cpu_to_be16(
-			__le16_to_cpu(phyerr->nf_chains[chain_idx]));
+	fft_sample->noise = __cpu_to_be16(phyerr->nf_chains[chain_idx]);
 
 	bins = (u8 *)fftr;
 	bins += sizeof(*fftr);
@@ -318,6 +335,11 @@ static ssize_t write_file_spec_scan_ctl(struct file *file,
 			 */
 			res = ath10k_spectral_scan_config(ar,
 							  ar->spectral.mode);
+			spin_lock_bh(&ar->data_lock);
+			ar->spectral.interfrc_5g = 0;
+			ar->spectral.interfrc_2g = 0;
+			spin_unlock_bh(&ar->data_lock);
+
 			if (res < 0) {
 				ath10k_warn(ar, "failed to reconfigure spectral scan: %d\n",
 					    res);

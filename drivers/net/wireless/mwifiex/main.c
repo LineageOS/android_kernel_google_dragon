@@ -128,6 +128,13 @@ static int mwifiex_unregister(struct mwifiex_adapter *adapter)
 		}
 	}
 
+	if (adapter->nd_info) {
+		for (i = 0 ; i < adapter->nd_info->n_matches ; i++)
+			kfree(adapter->nd_info->matches[i]);
+		kfree(adapter->nd_info);
+		adapter->nd_info = NULL;
+	}
+
 	kfree(adapter);
 	return 0;
 }
@@ -637,6 +644,13 @@ mwifiex_close(struct net_device *dev)
 		priv->scan_aborting = true;
 	}
 
+	if (priv->sched_scanning) {
+		mwifiex_dbg(priv->adapter, INFO,
+			    "aborting bgscan on ndo_stop\n");
+		mwifiex_stop_bg_scan(priv);
+		cfg80211_sched_scan_stopped(priv->wdev.wiphy);
+	}
+
 	netif_tx_stop_all_queues(dev);
 	return 0;
 }
@@ -796,6 +810,9 @@ mwifiex_tx_timeout(struct net_device *dev)
 		    jiffies, priv->tx_timeout_cnt, priv->bss_type,
 		    priv->bss_num);
 	mwifiex_set_trans_start(dev);
+
+	if (priv->adapter->if_ops.read_regs)
+		priv->adapter->if_ops.read_regs(priv->adapter);
 
 	if (priv->tx_timeout_cnt > TX_TIMEOUT_THRESHOLD &&
 	    priv->adapter->if_ops.card_reset) {
