@@ -25,6 +25,13 @@
 /* Keep the mean chain length below this constant */
 #define MEAN_CHAIN_LEN		2
 
+#if CONFIG_MAC80211_DEBUGFS
+static void mpath_debugfs_add(struct ieee80211_sub_if_data *sdata,
+			      const u8 *dst);
+static void mpath_debugfs_del(struct ieee80211_sub_if_data *sdata,
+			      struct mesh_path *mpath);
+#endif
+
 static inline bool mpath_expired(struct mesh_path *mpath)
 {
 	return (mpath->flags & MESH_PATH_ACTIVE) &&
@@ -672,10 +679,10 @@ struct mesh_path *mesh_path_add(struct ieee80211_sub_if_data *sdata,
 		set_bit(MESH_WORK_GROW_MPATH_TABLE,  &ifmsh->wrkq_flags);
 		ieee80211_queue_work(&local->hw, &sdata->work);
 	}
-#ifdef CONFIG_MAC80211_DEBUGFS
-	mesh_path_debugfs_add(new_mpath);
-#endif
 	mpath = new_mpath;
+#if CONFIG_MAC80211_DEBUGFS
+	mpath_debugfs_add(sdata, dst);
+#endif
 found:
 	spin_unlock(&tbl->hashwlock[hash_idx]);
 	read_unlock_bh(&pathtbl_resize_lock);
@@ -866,9 +873,6 @@ static void mesh_path_node_reclaim(struct rcu_head *rp)
 	struct mpath_node *node = container_of(rp, struct mpath_node, rcu);
 
 	del_timer_sync(&node->mpath->timer);
-#ifdef CONFIG_MAC80211_DEBUGFS
-	mesh_path_debugfs_remove(node->mpath);
-#endif
 	kfree(node->mpath);
 	kfree(node);
 }
@@ -879,6 +883,9 @@ static void __mesh_path_del(struct mesh_table *tbl, struct mpath_node *node)
 	struct mesh_path *mpath = node->mpath;
 	struct ieee80211_sub_if_data *sdata = node->mpath->sdata;
 
+#if CONFIG_MAC80211_DEBUGFS
+	mpath_debugfs_del(sdata, mpath);
+#endif
 	spin_lock(&mpath->state_lock);
 	mpath->flags |= MESH_PATH_RESOLVING;
 	if (mpath->is_gate)
@@ -989,6 +996,46 @@ int mesh_path_del(struct ieee80211_sub_if_data *sdata, const u8 *addr)
 
 	read_lock_bh(&pathtbl_resize_lock);
 	tbl = resize_dereference_mesh_paths();
+	hash_idx = mesh_table_hash(addr, sdata, tbl);
+	bucket = &tbl->hash_buckets[hash_idx];
+
+	spin_lock(&tbl->hashwlock[hash_idx]);
+	hlist_for_each_entry(node, bucket, list) {
+		mpath = node->mpath;
+		if (mpath->sdata == sdata &&
+		    ether_addr_equal(addr, mpath->dst)) {
+			__mesh_path_del(tbl, node);
+			goto enddel;
+		}
+	}
+
+	err = -ENXIO;
+enddel:
+	mesh_paths_generation++;
+	spin_unlock(&tbl->hashwlock[hash_idx]);
+	read_unlock_bh(&pathtbl_resize_lock);
+	return err;
+}
+
+/**
+ * mpp_path_del - delete a mesh proxy path from the table
+ *
+ * @addr: addr address (ETH_ALEN length)
+ * @sdata: local subif
+ *
+ * Returns: 0 if successful
+ */
+static int mpp_path_del(struct ieee80211_sub_if_data *sdata, const u8 *addr)
+{
+	struct mesh_table *tbl;
+	struct mesh_path *mpath;
+	struct mpath_node *node;
+	struct hlist_head *bucket;
+	int hash_idx;
+	int err = 0;
+
+	read_lock_bh(&pathtbl_resize_lock);
+	tbl = resize_dereference_mpp_paths();
 	hash_idx = mesh_table_hash(addr, sdata, tbl);
 	bucket = &tbl->hash_buckets[hash_idx];
 
@@ -1229,6 +1276,17 @@ void mesh_path_expire(struct ieee80211_sub_if_data *sdata)
 			++expired_deleted;
 		}
 	}
+
+	tbl = rcu_dereference(mpp_paths);
+	for_each_mesh_entry(tbl, node, i) {
+		if (node->mpath->sdata != sdata)
+			continue;
+		mpath = node->mpath;
+		if ((!(mpath->flags & MESH_PATH_FIXED)) &&
+		    time_after(jiffies, mpath->exp_time + MESH_PATH_EXPIRE))
+			mpp_path_del(mpath->sdata, mpath->dst);
+	}
+
 	rcu_read_unlock();
 	if (expired_deleted) {
 		mpath_dbg(sdata, " MESH MPU %d entries expired and deleted \n",
@@ -1269,3 +1327,86 @@ void mesh_pathtbl_unregister(void)
 	mesh_table_free(rcu_dereference_protected(mesh_paths, 1), true);
 	mesh_table_free(rcu_dereference_protected(mpp_paths, 1), true);
 }
+
+#if CONFIG_MAC80211_DEBUGFS
+static void mpath_debugfs_add(struct ieee80211_sub_if_data *sdata,
+			      const u8 *dst)
+{
+	struct ieee80211_if_mesh *ifmsh = &sdata->u.mesh;
+	struct path_debugfs_work *new_df_work =
+			kzalloc(sizeof(struct path_debugfs_work), GFP_ATOMIC);
+	if (!new_df_work)
+		return;
+
+	new_df_work->add_entry = true;
+	memcpy(new_df_work->dst, dst, ETH_ALEN);
+	spin_lock(&ifmsh->path_debugfs_lock);
+	if (!ifmsh->path_df_list) {
+		spin_unlock(&ifmsh->path_debugfs_lock);
+		kfree(new_df_work);
+		return;
+	}
+	list_add_tail_rcu(&new_df_work->list, ifmsh->path_df_list);
+	spin_unlock(&ifmsh->path_debugfs_lock);
+	set_bit(MESH_WORK_UPDATE_PATH_DEBUGFS,  &ifmsh->wrkq_flags);
+	ieee80211_queue_work(&sdata->local->hw, &sdata->work);
+}
+
+static void mpath_debugfs_del(struct ieee80211_sub_if_data *sdata,
+			      struct mesh_path *mpath)
+{
+	struct ieee80211_if_mesh *ifmsh = &sdata->u.mesh;
+	struct path_debugfs_work *new_df_work;
+
+	if (mpath->debugfs.add_has_run && mpath->debugfs.dir) {
+		new_df_work = kzalloc(sizeof(*new_df_work), GFP_ATOMIC);
+		if (!new_df_work)
+			return;
+		new_df_work->add_entry = false;
+		new_df_work->dst_dir = mpath->debugfs.dir;
+		spin_lock(&ifmsh->path_debugfs_lock);
+		if (!ifmsh->path_df_list) {
+			spin_unlock(&ifmsh->path_debugfs_lock);
+			kfree(new_df_work);
+			return;
+		}
+		list_add_tail_rcu(&new_df_work->list, ifmsh->path_df_list);
+		spin_unlock(&ifmsh->path_debugfs_lock);
+		set_bit(MESH_WORK_UPDATE_PATH_DEBUGFS,  &ifmsh->wrkq_flags);
+		ieee80211_queue_work(&sdata->local->hw, &sdata->work);
+	}
+}
+
+void mesh_path_debugfs_work(struct ieee80211_sub_if_data *sdata)
+{
+	struct ieee80211_if_mesh *ifmsh = &sdata->u.mesh;
+	struct path_debugfs_work *p, *n;
+	struct mesh_path *mpath;
+
+	spin_lock(&ifmsh->path_debugfs_lock);
+	if (!ifmsh->path_df_list) {
+		spin_unlock(&ifmsh->path_debugfs_lock);
+		return;
+	}
+	list_for_each_entry_safe(p, n, ifmsh->path_df_list, list) {
+		list_del_rcu(&p->list);
+		spin_unlock(&ifmsh->path_debugfs_lock);
+		synchronize_rcu();
+		if (p->add_entry) {
+			rcu_read_lock();
+			mpath = mesh_path_lookup(sdata, p->dst);
+			if (mpath && !mpath->debugfs.add_has_run) {
+				rcu_read_unlock();
+				mesh_path_debugfs_add(mpath);
+			} else {
+				rcu_read_unlock();
+			}
+		} else {
+			mesh_path_debugfs_remove(p->dst_dir);
+		}
+		kfree(p);
+		spin_lock(&ifmsh->path_debugfs_lock);
+	}
+	spin_unlock(&ifmsh->path_debugfs_lock);
+}
+#endif

@@ -1,3 +1,14 @@
+config DRM_GENERIC_GPIO_MUX
+	tristate "Generic GPIO-controlled mux"
+	depends on DRM
+	depends on OF
+	select DRM_KMS_HELPER
+	---help---
+	  This bridge driver models a GPIO-controlled display mux with one
+	  input, 2 outputs (e.g. an HDMI mux). The hardware decides which output
+	  is active, reports it as a GPIO, and the driver redirects calls to the
+	  appropriate downstream bridge (if any).
+
 config DRM_PARADE_PS8640
 	tristate "Parade PS8640 MIPI DSI to eDP Converter"
 	depends on DRM
@@ -16,6 +27,15 @@ config DRM_PTN3460
 	select DRM_KMS_HELPER
 	---help---
 	  Parade eDP-LVDS bridge chip driver.
+
+config DRM_ANALOGIX_ANX7688
+	tristate "Analogix ANX7688 bridge"
+	depends on DRM
+	select DRM_KMS_HELPER
+	---help---
+	  ANX7688 is a transmitter to support DisplayPort over USB-C for
+	  smartphone and tablets.
+	  This driver only supports the HDMI to DP component of the chip.
 
 config DRM_ANX78XX
 	tristate "Analogix ANX78XX bridge"

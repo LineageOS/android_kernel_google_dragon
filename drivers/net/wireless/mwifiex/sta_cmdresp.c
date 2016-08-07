@@ -44,7 +44,6 @@ static void
 mwifiex_process_cmdresp_error(struct mwifiex_private *priv,
 			      struct host_cmd_ds_command *resp)
 {
-	struct cmd_ctrl_node *cmd_node = NULL, *tmp_node;
 	struct mwifiex_adapter *adapter = priv->adapter;
 	struct host_cmd_ds_802_11_ps_mode_enh *pm;
 	unsigned long flags;
@@ -72,17 +71,7 @@ mwifiex_process_cmdresp_error(struct mwifiex_private *priv,
 		break;
 	case HostCmd_CMD_802_11_SCAN:
 	case HostCmd_CMD_802_11_SCAN_EXT:
-		/* Cancel all pending scan command */
-		spin_lock_irqsave(&adapter->scan_pending_q_lock, flags);
-		list_for_each_entry_safe(cmd_node, tmp_node,
-					 &adapter->scan_pending_q, list) {
-			list_del(&cmd_node->list);
-			spin_unlock_irqrestore(&adapter->scan_pending_q_lock,
-					       flags);
-			mwifiex_insert_cmd_to_free_q(adapter, cmd_node);
-			spin_lock_irqsave(&adapter->scan_pending_q_lock, flags);
-		}
-		spin_unlock_irqrestore(&adapter->scan_pending_q_lock, flags);
+		mwifiex_cancel_pending_scan_cmd(adapter);
 
 		spin_lock_irqsave(&adapter->mwifiex_cmd_lock, flags);
 		adapter->scan_processing = false;
@@ -565,7 +554,8 @@ static int mwifiex_ret_802_11_deauthenticate(struct mwifiex_private *priv,
 	if (!memcmp(resp->params.deauth.mac_addr,
 		    &priv->curr_bss_params.bss_descriptor.mac_address,
 		    sizeof(resp->params.deauth.mac_addr)))
-		mwifiex_reset_connect_state(priv, WLAN_REASON_DEAUTH_LEAVING);
+		mwifiex_reset_connect_state(priv, WLAN_REASON_DEAUTH_LEAVING,
+					    false);
 
 	return 0;
 }
@@ -578,7 +568,7 @@ static int mwifiex_ret_802_11_deauthenticate(struct mwifiex_private *priv,
 static int mwifiex_ret_802_11_ad_hoc_stop(struct mwifiex_private *priv,
 					  struct host_cmd_ds_command *resp)
 {
-	mwifiex_reset_connect_state(priv, WLAN_REASON_DEAUTH_LEAVING);
+	mwifiex_reset_connect_state(priv, WLAN_REASON_DEAUTH_LEAVING, false);
 	return 0;
 }
 

@@ -154,10 +154,17 @@ void drm_atomic_state_default_clear(struct drm_atomic_state *state)
 		if (!connector)
 			continue;
 
-		WARN_ON(!drm_modeset_is_locked(&config->connection_mutex));
-
-		connector->funcs->atomic_destroy_state(connector,
+		/*
+		 * FIXME: Async commits can race with connector unplugging and
+		 * there's currently nothing that prevents cleanup up state for
+		 * deleted connectors. As long as the callback doesn't look at
+		 * the connector we'll be fine though, so make sure that's the
+		 * case by setting all connector pointers to NULL.
+		 */
+		state->connector_states[i]->connector = NULL;
+		connector->funcs->atomic_destroy_state(NULL,
 						       state->connector_states[i]);
+		state->connectors[i] = NULL;
 		state->connector_states[i] = NULL;
 	}
 
@@ -169,6 +176,7 @@ void drm_atomic_state_default_clear(struct drm_atomic_state *state)
 
 		crtc->funcs->atomic_destroy_state(crtc,
 						  state->crtc_states[i]);
+		state->crtcs[i] = NULL;
 		state->crtc_states[i] = NULL;
 	}
 
@@ -180,6 +188,7 @@ void drm_atomic_state_default_clear(struct drm_atomic_state *state)
 
 		plane->funcs->atomic_destroy_state(plane,
 						   state->plane_states[i]);
+		state->planes[i] = NULL;
 		state->plane_states[i] = NULL;
 	}
 }

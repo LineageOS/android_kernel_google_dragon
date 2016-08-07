@@ -35,6 +35,8 @@
 #include "skl-sst-dsp.h"
 #include "skl-sst-ipc.h"
 
+static struct skl_machine_pdata skl_dmic_data;
+
 /*
  * initialize the PCI registers
  */
@@ -229,7 +231,12 @@ static int skl_suspend(struct device *dev)
 	 * running, we need to save the state for these and continue
 	 */
 	if (skl->supend_active) {
+		/* turn off the links and stop the CORB/RIRB DMA if it is On */
 		snd_hdac_ext_bus_link_power_down_all(ebus);
+
+		if (ebus->cmd_dma_state)
+			snd_hdac_bus_stop_cmd_io(&ebus->bus);
+
 		enable_irq_wake(bus->irq);
 		pci_save_state(pci);
 		pci_disable_device(pci);
@@ -255,6 +262,7 @@ static int skl_resume(struct device *dev)
 	struct hdac_ext_bus *ebus = pci_get_drvdata(pci);
 	struct skl *skl  = ebus_to_skl(ebus);
 	struct hdac_bus *bus = ebus_to_hbus(ebus);
+	struct hdac_ext_link *hlink = NULL;
 	int ret;
 
 	/* Turned OFF in HDMI codec driver after codec reconfiguration */
@@ -276,8 +284,29 @@ static int skl_resume(struct device *dev)
 		ret = pci_enable_device(pci);
 		snd_hdac_ext_bus_link_power_up_all(ebus);
 		disable_irq_wake(bus->irq);
+		/*
+		 * turn On the links which are On before active suspend
+		 * and start the CORB/RIRB DMA if On before
+		 * active suspend.
+		 */
+		list_for_each_entry(hlink, &ebus->hlink_list, list) {
+			if (hlink->ref_count)
+				snd_hdac_ext_bus_link_power_up(hlink);
+		}
+
+		if (ebus->cmd_dma_state)
+			snd_hdac_bus_init_cmd_io(&ebus->bus);
 	} else {
 		ret = _skl_resume(ebus);
+
+		/* turn off the links which are off before suspend */
+		list_for_each_entry(hlink, &ebus->hlink_list, list) {
+			if (!hlink->ref_count)
+				snd_hdac_ext_bus_link_power_down(hlink);
+		}
+
+		if (!ebus->cmd_dma_state)
+			snd_hdac_bus_stop_cmd_io(&ebus->bus);
 	}
 
 	return ret;
@@ -370,6 +399,10 @@ static int skl_machine_device_register(struct skl *skl, void *driver_data)
 		platform_device_put(pdev);
 		return -EIO;
 	}
+
+	if (mach->pdata)
+		dev_set_drvdata(&pdev->dev, mach->pdata);
+
 	skl->i2s_dev = pdev;
 
 	return 0;
@@ -613,6 +646,7 @@ static int skl_probe(struct pci_dev *pci,
 	struct skl *skl;
 	struct hdac_ext_bus *ebus = NULL;
 	struct hdac_bus *bus = NULL;
+	struct hdac_ext_link *hlink = NULL;
 	int err;
 
 	/* we use ext core ops, so provide NULL for ops here */
@@ -637,6 +671,8 @@ static int skl_probe(struct pci_dev *pci,
 	skl_nhlt_update_topology_bin(skl);
 
 	pci_set_drvdata(skl->pci, ebus);
+
+	skl_dmic_data.dmic_num = skl_get_dmic_geo(skl);
 
 	/* check if dsp is there */
 	if (ebus->ppcap) {
@@ -678,6 +714,12 @@ static int skl_probe(struct pci_dev *pci,
 			return err;
 		}
 	}
+
+	/*
+	 * we are done probling so decrement link counts
+	 */
+	list_for_each_entry(hlink, &ebus->hlink_list, list)
+		snd_hdac_ext_bus_link_put(ebus, hlink);
 
 	/*configure PM */
 	pm_runtime_put_noidle(bus->dev);
@@ -750,9 +792,9 @@ static void skl_remove(struct pci_dev *pci)
 static struct sst_acpi_mach sst_skl_devdata[] = {
 	{ "INT343A", "skl_alc286s_i2s", "intel/dsp_fw_release.bin", NULL, NULL, NULL },
 	{ "INT343B", "skl_nau88l25_ssm4567_i2s", "intel/dsp_fw_release.bin",
-				NULL, NULL, NULL },
+				NULL, NULL, &skl_dmic_data },
 	{ "MX98357A", "skl_nau88l25_max98357a_i2s", "intel/dsp_fw_release.bin",
-				NULL, NULL, NULL },
+				NULL, NULL, &skl_dmic_data },
 	{}
 };
 

@@ -720,6 +720,12 @@ struct ieee80211_if_mesh {
 
 	u8 bitrate_avg_weight;
 	u8 path_switch_threshold;
+
+#if CONFIG_MAC80211_DEBUGFS
+	/* mpath debugfs structures */
+	spinlock_t path_debugfs_lock;
+	struct list_head *path_df_list;
+#endif
 };
 
 #ifdef CONFIG_MAC80211_MESH
@@ -1351,6 +1357,11 @@ struct ieee80211_local {
 	enum ieee80211_smps_mode smps_mode;
 
 	struct work_struct restart_work;
+
+#ifdef CONFIG_MAC80211_PACKET_TRACE
+	bool pt_enable;
+	void *pt_config;
+#endif
 
 #ifdef CONFIG_MAC80211_DEBUGFS
 	struct local_debugfsdentries {

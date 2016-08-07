@@ -700,8 +700,11 @@ static int btmrvl_sdio_card_to_host(struct btmrvl_private *priv)
 	ret = btmrvl_sdio_read_rx_len(card, &buf_len);
 	if (ret < 0) {
 		BT_ERR("read rx_len failed");
-		ret = -EIO;
-		goto exit;
+		ret = btmrvl_sdio_read_rx_len(card, &buf_len);
+		if (ret < 0) {
+			BT_ERR("read rx_len 2nd attempt also failed: %d", ret);
+			buf_len = 16;
+		}
 	}
 
 	blksz = SDIO_BLOCK_SIZE;
@@ -735,8 +738,13 @@ static int btmrvl_sdio_card_to_host(struct btmrvl_private *priv)
 			  num_blocks * blksz);
 	if (ret < 0) {
 		BT_ERR("readsb failed: %d", ret);
-		ret = -EIO;
-		goto exit;
+		ret = sdio_readsb(card->func, payload, card->ioport,
+				  num_blocks * blksz);
+		if (ret < 0) {
+			BT_ERR("readsb 2nd attempt also failed: %d", ret);
+			ret = -EIO;
+			goto exit;
+		}
 	}
 
 	/* This is SDIO specific header length: byte[2][1][0], type: byte[3]
@@ -839,7 +847,13 @@ static int btmrvl_sdio_read_to_clear(struct btmrvl_sdio_card *card, u8 *ireg)
 	ret = sdio_readsb(card->func, adapter->hw_regs, 0, SDIO_BLOCK_SIZE);
 	if (ret) {
 		BT_ERR("sdio_readsb: read int hw_regs failed: %d", ret);
-		return ret;
+		ret = sdio_readsb(card->func, adapter->hw_regs, 0,
+				  SDIO_BLOCK_SIZE);
+		if (ret) {
+			BT_ERR("read int hw_regs 2nd attempt also failed: %d",
+			       ret);
+			return ret;
+		}
 	}
 
 	*ireg = adapter->hw_regs[card->reg->host_intstatus];
@@ -1071,7 +1085,6 @@ static int btmrvl_sdio_host_to_card(struct btmrvl_private *priv,
 {
 	struct btmrvl_sdio_card *card = priv->btmrvl_dev.card;
 	int ret = 0;
-	int buf_block_len;
 	int blksz;
 	int i = 0;
 	u8 *buf = NULL;
@@ -1083,9 +1096,13 @@ static int btmrvl_sdio_host_to_card(struct btmrvl_private *priv,
 		return -EINVAL;
 	}
 
+	blksz = DIV_ROUND_UP(nb, SDIO_BLOCK_SIZE) * SDIO_BLOCK_SIZE;
+
 	buf = payload;
-	if ((unsigned long) payload & (BTSDIO_DMA_ALIGN - 1)) {
-		tmpbufsz = ALIGN_SZ(nb, BTSDIO_DMA_ALIGN);
+	if ((unsigned long) payload & (BTSDIO_DMA_ALIGN - 1) ||
+	    nb < blksz) {
+		tmpbufsz = ALIGN_SZ(blksz, BTSDIO_DMA_ALIGN) +
+			   BTSDIO_DMA_ALIGN;
 		tmpbuf = kzalloc(tmpbufsz, GFP_KERNEL);
 		if (!tmpbuf)
 			return -ENOMEM;
@@ -1093,15 +1110,12 @@ static int btmrvl_sdio_host_to_card(struct btmrvl_private *priv,
 		memcpy(buf, payload, nb);
 	}
 
-	blksz = SDIO_BLOCK_SIZE;
-	buf_block_len = DIV_ROUND_UP(nb, blksz);
-
 	sdio_claim_host(card->func);
 
 	do {
 		/* Transfer data to card */
 		ret = sdio_writesb(card->func, card->ioport, buf,
-				   buf_block_len * blksz);
+				   blksz);
 		if (ret < 0) {
 			i++;
 			BT_ERR("i=%d writesb failed: %d", i, ret);
@@ -1625,6 +1639,7 @@ static int btmrvl_sdio_suspend(struct device *dev)
 	if (priv->adapter->hs_state != HS_ACTIVATED) {
 		if (btmrvl_enable_hs(priv)) {
 			BT_ERR("HS not actived, suspend failed!");
+			priv->adapter->is_suspending = false;
 			return -EBUSY;
 		}
 	}

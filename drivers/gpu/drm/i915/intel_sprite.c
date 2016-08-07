@@ -764,12 +764,14 @@ intel_check_sprite_plane(struct drm_plane *plane,
 	/* Don't modify another pipe's plane */
 	if (intel_plane->pipe != intel_crtc->pipe) {
 		DRM_DEBUG_KMS("Wrong plane <-> crtc mapping\n");
+		atomic_inc(&intel_crtc->error_count);
 		return -EINVAL;
 	}
 
 	/* FIXME check all gen limits */
 	if (fb->width < 3 || fb->height < 3 || fb->pitches[0] > 16384) {
 		DRM_DEBUG_KMS("Unsuitable framebuffer for plane\n");
+		atomic_inc(&intel_crtc->error_count);
 		return -EINVAL;
 	}
 
@@ -817,18 +819,20 @@ intel_check_sprite_plane(struct drm_plane *plane,
 		hscale = drm_rect_calc_hscale(src, dst, min_scale, max_scale);
 		if (hscale < 0) {
 			DRM_DEBUG_KMS("Horizontal scaling factor out of limits\n");
-			drm_rect_debug_print(src, true);
-			drm_rect_debug_print(dst, false);
+			drm_rect_debug_print("src: ", src, true);
+			drm_rect_debug_print("dst: ", dst, false);
 
+			atomic_inc(&intel_crtc->error_count);
 			return hscale;
 		}
 
 		vscale = drm_rect_calc_vscale(src, dst, min_scale, max_scale);
 		if (vscale < 0) {
 			DRM_DEBUG_KMS("Vertical scaling factor out of limits\n");
-			drm_rect_debug_print(src, true);
-			drm_rect_debug_print(dst, false);
+			drm_rect_debug_print("src: ", src, true);
+			drm_rect_debug_print("dst: ", dst, false);
 
+			atomic_inc(&intel_crtc->error_count);
 			return vscale;
 		}
 
@@ -894,6 +898,7 @@ intel_check_sprite_plane(struct drm_plane *plane,
 		if (INTEL_INFO(dev)->gen < 9 && (src_w > 2048 || src_h > 2048 ||
 		    width_bytes > 4096 || fb->pitches[0] > 4096)) {
 			DRM_DEBUG_KMS("Source dimensions exceed hardware limits\n");
+			atomic_inc(&intel_crtc->error_count);
 			return -EINVAL;
 		}
 	}

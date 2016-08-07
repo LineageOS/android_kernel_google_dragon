@@ -26,3 +26,11 @@
 		reg = <0x4c>;
 	};
 };
+
+&mt6397_vgp6_reg {
+	/delete-property/regulator-always-on;
+};
+
+&trackpad {
+	/delete-property/vcc-supply;
+};

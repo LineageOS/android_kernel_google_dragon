@@ -1240,6 +1240,9 @@ static int mwifiex_cfg80211_change_beacon(struct wiphy *wiphy,
 					  struct cfg80211_beacon_data *data)
 {
 	struct mwifiex_private *priv = mwifiex_netdev_get_priv(dev);
+	struct mwifiex_adapter *adapter = priv->adapter;
+
+	mwifiex_cancel_scan(adapter);
 
 	if (GET_BSS_ROLE(priv) != MWIFIEX_BSS_ROLE_UAP) {
 		mwifiex_dbg(priv->adapter, ERROR,
@@ -1803,6 +1806,9 @@ mwifiex_cfg80211_connect(struct wiphy *wiphy, struct net_device *dev,
 		return -EALREADY;
 	}
 
+	if (priv->scan_block)
+		priv->scan_block = false;
+
 	if (adapter->surprise_removed || adapter->is_cmd_timedout) {
 		mwifiex_dbg(adapter, ERROR,
 			    "%s: Ignore connection.\t"
@@ -2017,6 +2023,9 @@ mwifiex_cfg80211_scan(struct wiphy *wiphy,
 			    "cmd: Scan already in process..\n");
 		return -EBUSY;
 	}
+
+	if (!priv->wdev.current_bss && priv->scan_block)
+		priv->scan_block = false;
 
 	if (!mwifiex_stop_bg_scan(priv))
 		cfg80211_sched_scan_stopped_rtnl(priv->wdev.wiphy);
@@ -2745,6 +2754,10 @@ static int mwifiex_cfg80211_suspend(struct wiphy *wiphy,
 	struct mwifiex_ds_hs_cfg hs_cfg;
 	int i, ret = 0, retry_num = 10;
 	struct mwifiex_private *priv;
+	struct mwifiex_private *sta_priv =
+			mwifiex_get_priv(adapter, MWIFIEX_BSS_ROLE_STA);
+
+	sta_priv->scan_aborting = true;
 
 	mwifiex_cancel_all_pending_cmd(adapter);
 
@@ -2767,21 +2780,21 @@ static int mwifiex_cfg80211_suspend(struct wiphy *wiphy,
 
 	if (!wowlan) {
 		dev_warn(adapter->dev, "None of the WOWLAN triggers enabled\n");
-		return 0;
+		ret = 0;
+		goto done;
 	}
 
-	priv = mwifiex_get_priv(adapter, MWIFIEX_BSS_ROLE_STA);
-
-	if (!priv->media_connected && !wowlan->nd_config) {
+	if (!sta_priv->media_connected && !wowlan->nd_config) {
 		dev_warn(adapter->dev,
 			 "Can not configure WOWLAN in disconnected state\n");
-		return 0;
+		ret = 0;
+		goto done;
 	}
 
-	ret = mwifiex_set_mef_filter(priv, wowlan);
+	ret = mwifiex_set_mef_filter(sta_priv, wowlan);
 	if (ret) {
 		dev_err(adapter->dev, "Failed to set MEF filter\n");
-		return ret;
+		goto done;
 	}
 
 	memset(&hs_cfg, 0, sizeof(hs_cfg));
@@ -2790,26 +2803,25 @@ static int mwifiex_cfg80211_suspend(struct wiphy *wiphy,
 	if (wowlan->nd_config) {
 		mwifiex_dbg(adapter, INFO, "Wake on net detect\n");
 		hs_cfg.conditions |= HS_CFG_COND_MAC_EVENT;
-		mwifiex_cfg80211_sched_scan_start(wiphy, priv->netdev,
+		mwifiex_cfg80211_sched_scan_start(wiphy, sta_priv->netdev,
 						  wowlan->nd_config);
 	}
 
 	if (wowlan->disconnect) {
 		hs_cfg.conditions |= HS_CFG_COND_MAC_EVENT;
-		mwifiex_dbg(priv->adapter, INFO, "Wake on device disconnect\n");
+		mwifiex_dbg(sta_priv->adapter, INFO, "Wake on device disconnect\n");
 	}
 
 	hs_cfg.is_invoke_hostcmd = false;
 	hs_cfg.gpio = adapter->hs_cfg.gpio;
 	hs_cfg.gap = adapter->hs_cfg.gap;
-	ret = mwifiex_set_hs_params(priv, HostCmd_ACT_GEN_SET,
+	ret = mwifiex_set_hs_params(sta_priv, HostCmd_ACT_GEN_SET,
 				    MWIFIEX_SYNC_CMD, &hs_cfg);
-	if (ret) {
-		mwifiex_dbg(adapter, ERROR,
-			    "Failed to set HS params\n");
-		return ret;
-	}
+	if (ret)
+		mwifiex_dbg(adapter, ERROR, "Failed to set HS params\n");
 
+done:
+	sta_priv->scan_aborting = false;
 	return ret;
 }
 

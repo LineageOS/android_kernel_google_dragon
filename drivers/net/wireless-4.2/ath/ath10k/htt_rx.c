@@ -22,6 +22,9 @@
 #include "debug.h"
 #include "trace.h"
 #include "mac.h"
+#ifdef CONFIG_ATH10K_SMART_ANTENNA
+#include "smart_ant.h"
+#endif
 
 #include <linux/log2.h>
 
@@ -400,6 +403,9 @@ static int ath10k_htt_rx_amsdu_pop(struct ath10k_htt *htt,
 
 		trace_ath10k_htt_rx_desc(ar, &rx_desc->attention,
 					 sizeof(*rx_desc) - sizeof(u32));
+#ifdef CONFIG_ATH10K_SMART_ANTENNA
+		ath10k_smart_ant_proc_rx_feedback(ar, rx_desc);
+#endif
 
 		if (last_msdu)
 			break;
@@ -2584,7 +2590,6 @@ void ath10k_htt_t2h_msg_handler(struct ath10k *ar, struct sk_buff *skb)
 			ath10k_htt_tx_mgmt_dec_pending(htt);
 			spin_unlock_bh(&htt->tx_lock);
 		}
-		ath10k_mac_tx_push_pending(ar);
 		break;
 	}
 	case HTT_T2H_MSG_TYPE_TX_COMPL_IND:
@@ -2629,16 +2634,17 @@ void ath10k_htt_t2h_msg_handler(struct ath10k *ar, struct sk_buff *skb)
 		ath10k_htt_rx_delba(ar, resp);
 		break;
 	case HTT_T2H_MSG_TYPE_PKTLOG: {
-		struct ath10k_pktlog_hdr *hdr =
-			(struct ath10k_pktlog_hdr *)resp->pktlog_msg.payload;
-
 		trace_ath10k_htt_pktlog(ar, resp->pktlog_msg.payload,
-					sizeof(*hdr) +
-					__le16_to_cpu(hdr->size));
+					skb->len -
+					offsetof(struct htt_resp,
+						 pktlog_msg.payload));
 		ath10k_htt_rx_pktlog(ar, &resp->pktlog_msg,
 				     skb->len - sizeof(resp->pktlog_msg));
 		if (ath10k_peer_stats_enabled(ar))
 			ath10k_fetch_10_2_tx_stats(ar, resp->pktlog_msg.payload);
+#ifdef CONFIG_ATH10K_SMART_ANTENNA
+		ath10k_smart_ant_proc_tx_feedback(ar, resp->pktlog_msg.payload);
+#endif
 		break;
 	}
 	case HTT_T2H_MSG_TYPE_RX_FLUSH: {
@@ -2678,6 +2684,8 @@ void ath10k_htt_t2h_msg_handler(struct ath10k *ar, struct sk_buff *skb)
 		ath10k_htt_rx_tx_mode_switch_ind(ar, skb);
 		break;
 	case HTT_T2H_MSG_TYPE_EN_STATS:
+		ath10k_smart_ant_10_4_proc_tx_feedback(ar, skb);
+		break;
 	default:
 		ath10k_warn(ar, "htt event (%d) not handled\n",
 			    resp->hdr.msg_type);
@@ -2743,8 +2751,6 @@ static void ath10k_htt_txrx_compl_task(unsigned long ptr)
 		ath10k_htt_rx_tx_fetch_ind(ar, skb);
 		dev_kfree_skb_any(skb);
 	}
-
-	ath10k_mac_tx_push_pending(ar);
 
 	while ((skb = __skb_dequeue(&rx_q))) {
 		resp = (struct htt_resp *)skb->data;

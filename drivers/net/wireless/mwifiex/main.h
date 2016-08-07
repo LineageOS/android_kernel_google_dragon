@@ -60,6 +60,9 @@ extern const char driver_version[];
 extern bool mfg_mode;
 extern char mfg_firmware[32];
 
+struct mwifiex_adapter;
+struct mwifiex_private;
+
 enum {
 	MWIFIEX_ASYNC_CMD,
 	MWIFIEX_SYNC_CMD
@@ -190,12 +193,11 @@ enum MWIFIEX_DEBUG_LEVEL {
 					MWIFIEX_DBG_FATAL | \
 					MWIFIEX_DBG_ERROR)
 
-#define mwifiex_dbg(adapter, dbg_mask, fmt, args...)		\
-do {								\
-	if ((adapter)->debug_mask & MWIFIEX_DBG_##dbg_mask)	\
-		if ((adapter)->dev)				\
-			dev_info((adapter)->dev, fmt, ## args);	\
-} while (0)
+__printf(3, 4)
+void _mwifiex_dbg(const struct mwifiex_adapter *adapter, int mask,
+		  const char *fmt, ...);
+#define mwifiex_dbg(adapter, mask, fmt, ...)				\
+	_mwifiex_dbg(adapter, MWIFIEX_DBG_##mask, fmt, ##__VA_ARGS__)
 
 /** Min BGSCAN interval 15 second */
 #define MWIFIEX_BGSCAN_INTERVAL 15000
@@ -510,9 +512,6 @@ enum mwifiex_iface_work_flags {
 	MWIFIEX_IFACE_WORK_CARD_RESET,
 	MWIFIEX_IFACE_WORK_READ_REGS,
 };
-
-struct mwifiex_adapter;
-struct mwifiex_private;
 
 struct mwifiex_private {
 	struct mwifiex_adapter *adapter;
@@ -984,9 +983,9 @@ int mwifiex_alloc_cmd_buffer(struct mwifiex_adapter *adapter);
 int mwifiex_free_cmd_buffer(struct mwifiex_adapter *adapter);
 void mwifiex_cancel_all_pending_cmd(struct mwifiex_adapter *adapter);
 void mwifiex_cancel_pending_ioctl(struct mwifiex_adapter *adapter);
+void mwifiex_cancel_pending_scan_cmd(struct mwifiex_adapter *adapter);
+void mwifiex_cancel_scan(struct mwifiex_adapter *adapter);
 
-void mwifiex_insert_cmd_to_free_q(struct mwifiex_adapter *adapter,
-				  struct cmd_ctrl_node *cmd_node);
 void mwifiex_recycle_cmd_node(struct mwifiex_adapter *adapter,
 			      struct cmd_ctrl_node *cmd_node);
 
@@ -1058,7 +1057,8 @@ int mwifiex_cmd_802_11_associate(struct mwifiex_private *priv,
 				 struct mwifiex_bssdescriptor *bss_desc);
 int mwifiex_ret_802_11_associate(struct mwifiex_private *priv,
 				 struct host_cmd_ds_command *resp);
-void mwifiex_reset_connect_state(struct mwifiex_private *priv, u16 reason);
+void mwifiex_reset_connect_state(struct mwifiex_private *priv, u16 reason,
+				bool from_ap);
 u8 mwifiex_band_to_radio_type(u8 band);
 int mwifiex_deauthenticate(struct mwifiex_private *priv, u8 *mac);
 void mwifiex_deauthenticate_all(struct mwifiex_adapter *adapter);

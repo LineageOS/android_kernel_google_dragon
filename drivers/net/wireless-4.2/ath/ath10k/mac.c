@@ -31,6 +31,9 @@
 #include "wmi-tlv.h"
 #include "wmi-ops.h"
 #include "wow.h"
+#ifdef CONFIG_ATH10K_SMART_ANTENNA
+#include "smart_ant.h"
+#endif
 
 /*********/
 /* Rates */
@@ -3810,6 +3813,9 @@ void ath10k_mac_tx_push_pending(struct ath10k *ar)
 	int ret;
 	int max;
 
+	if (ar->htt.num_pending_tx >= (ar->htt.max_num_pending_tx / 2))
+		return;
+
 	spin_lock_bh(&ar->txqs_lock);
 	rcu_read_lock();
 
@@ -3821,20 +3827,21 @@ void ath10k_mac_tx_push_pending(struct ath10k *ar)
 
 		/* Prevent aggressive sta/tid taking over tx queue */
 		max = 16;
-		while (max--) {
+		ret = 0;
+		while (ath10k_mac_tx_can_push(hw, txq) && max--) {
 			ret = ath10k_mac_tx_push_txq(hw, txq);
 			if (ret < 0)
 				break;
 		}
 
 		list_del_init(&artxq->list);
+		if (ret != -ENOENT)
+			list_add_tail(&artxq->list, &ar->txqs);
+
 		ath10k_htt_tx_txq_update(hw, txq);
 
-		if (artxq == last || (ret < 0 && ret != -ENOENT)) {
-			if (ret != -ENOENT)
-				list_add_tail(&artxq->list, &ar->txqs);
+		if (artxq == last || (ret < 0 && ret != -ENOENT))
 			break;
-		}
 	}
 
 	rcu_read_unlock();
@@ -4074,15 +4081,12 @@ static void ath10k_mac_op_wake_tx_queue(struct ieee80211_hw *hw,
 	struct ath10k *ar = hw->priv;
 	struct ath10k_txq *artxq = (void *)txq->drv_priv;
 
-	if (ath10k_mac_tx_can_push(hw, txq)) {
-		spin_lock_bh(&ar->txqs_lock);
-		if (list_empty(&artxq->list))
-			list_add_tail(&artxq->list, &ar->txqs);
-		spin_unlock_bh(&ar->txqs_lock);
+	spin_lock_bh(&ar->txqs_lock);
+	if (list_empty(&artxq->list))
+		list_add_tail(&artxq->list, &ar->txqs);
+	spin_unlock_bh(&ar->txqs_lock);
 
-		tasklet_schedule(&ar->htt.txrx_compl_task);
-	}
-
+	ath10k_mac_tx_push_pending(ar);
 	ath10k_htt_tx_txq_update(hw, txq);
 }
 
@@ -4371,6 +4375,7 @@ static int ath10k_start(struct ieee80211_hw *hw)
 {
 	struct ath10k *ar = hw->priv;
 	u32 param;
+	u32 default_antenna_config;
 	int ret = 0;
 
 	/*
@@ -4475,16 +4480,6 @@ static int ath10k_start(struct ieee80211_hw *hw)
 		}
 	}
 
-	param = ar->wmi.pdev_param->ani_enable;
-	ret = ath10k_wmi_pdev_set_param(ar, param, 1);
-	if (ret) {
-		ath10k_warn(ar, "failed to enable ani by default: %d\n",
-			    ret);
-		goto err_core_stop;
-	}
-
-	ar->ani_enabled = true;
-
 	if (ath10k_peer_stats_enabled(ar)) {
 		param = ar->wmi.pdev_param->peer_stats_update_period;
 		ret = ath10k_wmi_pdev_set_param(ar, param,
@@ -4506,6 +4501,24 @@ static int ath10k_start(struct ieee80211_hw *hw)
 			goto err_core_stop;
 		}
 		clear_bit(ATH10K_FLAG_BTCOEX, &ar->dev_flags);
+	}
+
+	if (test_bit(WMI_SERVICE_SMART_ANTENNA_HW_SUPPORT, ar->wmi.svc_map)) {
+		default_antenna_config = ath10k_default_antenna_5g;
+		/* use different smart antenna defaults for 2G and 5G radio.
+		 * use 2G confiuration for dual band radio.
+		 */
+		if (ar->phy_capability & WHAL_WLAN_11G_CAPABILITY) {
+			default_antenna_config = ath10k_default_antenna_2g;
+		}
+		ret = ath10k_wmi_pdev_sa_disabled_ant_sel(
+				ar,
+				WMI_SMART_ANT_DISABLED_MODE_PARALLEL,
+				default_antenna_config, default_antenna_config);
+		if (ret) {
+			ath10k_warn(ar, "failed to set default antenna : %d\n",
+				    ret);
+		}
 	}
 
 	ar->num_started_vdevs = 0;
@@ -4989,6 +5002,23 @@ static int ath10k_add_interface(struct ieee80211_hw *hw,
 		goto err_peer_delete;
 	}
 
+#ifdef CONFIG_ATH10K_SMART_ANTENNA
+	ret = ath10k_smart_ant_enable(ar, arvif);
+	if (ret) {
+		ath10k_warn(ar, "failed to enable smart antenna algorithm %d\n",
+			    ret);
+		goto err_peer_delete;
+	}
+
+	ret = ath10k_smart_ant_set_default(ar, arvif);
+	if (ret) {
+		ath10k_warn(ar, "failed to set default smart antenna configuration %d\n",
+			    ret);
+		ath10k_smart_ant_disable(ar, arvif);
+		goto err_peer_delete;
+	}
+#endif
+
 	if (vif->type == NL80211_IFTYPE_MONITOR) {
 		ar->monitor_arvif = arvif;
 		ret = ath10k_monitor_recalc(ar);
@@ -5062,6 +5092,10 @@ static void ath10k_remove_interface(struct ieee80211_hw *hw,
 	cancel_delayed_work_sync(&arvif->connection_loss_work);
 
 	mutex_lock(&ar->conf_mutex);
+
+#ifdef CONFIG_ATH10K_SMART_ANTENNA
+	ath10k_smart_ant_disable(ar, arvif);
+#endif
 
 	spin_lock_bh(&ar->data_lock);
 	ath10k_mac_vif_beacon_cleanup(arvif);
@@ -6020,10 +6054,45 @@ static int ath10k_sta_state(struct ieee80211_hw *hw,
 		ath10k_dbg(ar, ATH10K_DBG_MAC, "mac sta %pM associated\n",
 			   sta->addr);
 
+#ifdef CONFIG_ATH10K_SMART_ANTENNA
+		reinit_completion(&ar->ratecode_evt);
+#endif
+
 		ret = ath10k_station_assoc(ar, vif, sta, false);
-		if (ret)
+		if (ret) {
 			ath10k_warn(ar, "failed to associate station %pM for vdev %i: %i\n",
 				    sta->addr, arvif->vdev_id, ret);
+			goto exit;
+		}
+
+#ifdef CONFIG_ATH10K_SMART_ANTENNA
+		/* wait for completion to get rate code list event from fw
+		 * after assoc_complete wmi command. This ratecode list info
+		 * can be used with smart antenna logic. As of now do this
+		 * only for AP mode because this is the only mode tested with
+		 * smart antenna APIs.
+		 */
+		if (vif->type == NL80211_IFTYPE_AP &&
+		    ath10k_smart_ant_enabled(ar)) {
+			int timeout;
+
+			timeout = wait_for_completion_timeout(
+			&ar->ratecode_evt,
+			msecs_to_jiffies(ATH10K_RATECODE_LIST_TIMEOUT));
+			if (timeout == 0) {
+				ath10k_warn(ar, "timeout on rate code list event %pM\n",
+					    sta->addr);
+				ret = -ETIMEDOUT;
+				goto exit;
+			}
+
+			if (ath10k_smart_ant_sta_connect(ar, arvif, sta)) {
+				ath10k_warn(ar,
+					    "Smart antenna station connect failed, disabling smart antenna for %pM\n",
+					    sta->addr);
+			}
+		}
+#endif
 	} else if (old_state == IEEE80211_STA_ASSOC &&
 		   new_state == IEEE80211_STA_AUTHORIZED &&
 		   sta->tdls) {
@@ -6055,6 +6124,10 @@ static int ath10k_sta_state(struct ieee80211_hw *hw,
 		 */
 		ath10k_dbg(ar, ATH10K_DBG_MAC, "mac sta %pM disassociated\n",
 			   sta->addr);
+
+#ifdef CONFIG_ATH10K_SMART_ANTENNA
+		ath10k_smart_ant_sta_disconnect(ar, sta);
+#endif
 
 		ret = ath10k_station_disassoc(ar, vif, sta);
 		if (ret)
@@ -7882,6 +7955,13 @@ int ath10k_mac_register(struct ath10k *ar)
 				   NL80211_FEATURE_AP_SCAN;
 
 	ar->hw->wiphy->max_ap_assoc_sta = ar->max_num_stations;
+
+	/* Firmware pull tx model requires per-station queue to be 2048 packets
+	 * long. Otherwise firmware's scheduling algorithm doesn't reach
+	 * optimal performance.
+	 */
+	if (test_bit(ATH10K_FW_FEATURE_PEER_FLOW_CONTROL, ar->fw_features))
+		ar->hw->txq_ac_max_pending = 2048;
 
 	ret = ath10k_wow_init(ar);
 	if (ret) {

@@ -52,6 +52,9 @@
 
 		pinctrl@0x01000000 {
 
+			pinctrl-0 = <&bt_pins_default>;
+			pinctrl-names = "default";
+
 			fw_pins: fw_pinmux {
 				wp {
 					pins = "gpio6";
@@ -84,6 +87,13 @@
 			rx_active {
 					pins = "gpio43";
 					bias-pull,down;
+			};
+
+			bt_pins_default: bt_pins_default {
+				bt_reset {
+					pins = "gpio42";
+					output-high;
+				};
 			};
 
 			spi_0_pins: spi_0_pinmux {
@@ -252,6 +262,14 @@
 					function = "gpio";
 					bias-pull,up;
 					output-high;
+				};
+			};
+
+			wifi1_1_pins: wifi2_pinmux {
+				mux {
+					pins = "gpio58";
+					function = "smart1";
+					bias-disable;
 				};
 			};
 		};
@@ -462,7 +480,7 @@
 				compatible = "atmel,captouch";
 				reg = <0x51>;
 				interrupt-parent = <&tlmm>;
-				interrupts = <67 IRQ_TYPE_EDGE_FALLING>;
+				interrupts = <67 IRQ_TYPE_LEVEL_LOW>;
 				linux,keycodes = <BTN_0>, <BTN_1>,
 					<BTN_2>, <BTN_3>,
 					<BTN_4>, <BTN_5>,
@@ -500,6 +518,12 @@
 			pinctrl-names = "default";
 			vqmmc-supply = <&vccq_sd0>;
 			non-removable;
+		};
+
+		wifi1: wifi@a800000 {
+			status = "ok";
+			pinctrl-0 = <&wifi1_1_pins>;
+			pinctrl-names = "default";
 		};
 
 		gpio_keys {

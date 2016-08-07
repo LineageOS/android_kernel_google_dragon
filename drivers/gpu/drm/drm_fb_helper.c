@@ -38,6 +38,8 @@
 #include <drm/drm_crtc.h>
 #include <drm/drm_fb_helper.h>
 #include <drm/drm_crtc_helper.h>
+#include <drm/drm_atomic.h>
+#include <drm/drm_atomic_helper.h>
 
 static LIST_HEAD(kernel_fb_helper_list);
 
@@ -282,14 +284,82 @@ int drm_fb_helper_debug_leave(struct fb_info *info)
 }
 EXPORT_SYMBOL(drm_fb_helper_debug_leave);
 
-static bool restore_fbdev_mode(struct drm_fb_helper *fb_helper)
+static int restore_fbdev_mode_atomic(struct drm_fb_helper *fb_helper)
 {
 	struct drm_device *dev = fb_helper->dev;
 	struct drm_plane *plane;
-	bool error = false;
+	struct drm_atomic_state *state;
+	int i, ret;
+
+	state = drm_atomic_state_alloc(dev);
+	if (!state)
+		return -ENOMEM;
+
+	state->acquire_ctx = dev->mode_config.acquire_ctx;
+retry:
+	drm_for_each_plane(plane, dev) {
+		struct drm_plane_state *plane_state;
+
+		plane_state = drm_atomic_get_plane_state(state, plane);
+		if (IS_ERR(plane_state)) {
+			ret = PTR_ERR(plane_state);
+			goto fail;
+		}
+
+		ret = drm_atomic_plane_set_property(plane, plane_state,
+				dev->mode_config.rotation_property,
+				BIT(DRM_ROTATE_0));
+		if (ret != 0)
+			goto fail;
+
+		/* disable non-primary: */
+		if (plane->type == DRM_PLANE_TYPE_PRIMARY)
+			continue;
+
+		ret = __drm_atomic_helper_disable_plane(plane, plane_state);
+		if (ret != 0)
+			goto fail;
+	}
+
+	for(i = 0; i < fb_helper->crtc_count; i++) {
+		struct drm_mode_set *mode_set = &fb_helper->crtc_info[i].mode_set;
+
+		ret = __drm_atomic_helper_set_config(mode_set, state);
+		if (ret != 0)
+			goto fail;
+	}
+
+	ret = drm_atomic_commit(state);
+	if (ret != 0)
+		goto fail;
+
+	return 0;
+
+fail:
+	if (ret == -EDEADLK)
+		goto backoff;
+
+	drm_atomic_state_free(state);
+
+	return ret;
+
+backoff:
+	drm_atomic_state_clear(state);
+	drm_atomic_legacy_backoff(state);
+
+	goto retry;
+}
+
+static int restore_fbdev_mode(struct drm_fb_helper *fb_helper)
+{
+	struct drm_device *dev = fb_helper->dev;
+	struct drm_plane *plane;
 	int i;
 
 	drm_warn_on_modeset_not_all_locked(dev);
+
+	if (fb_helper->atomic)
+		return restore_fbdev_mode_atomic(fb_helper);
 
 	drm_for_each_plane(plane, dev) {
 		if (plane->type != DRM_PLANE_TYPE_PRIMARY)
@@ -310,14 +380,15 @@ static bool restore_fbdev_mode(struct drm_fb_helper *fb_helper)
 		if (crtc->funcs->cursor_set) {
 			ret = crtc->funcs->cursor_set(crtc, NULL, 0, 0, 0);
 			if (ret)
-				error = true;
+				return ret;
 		}
 
 		ret = drm_mode_set_config_internal(mode_set);
 		if (ret)
-			error = true;
+			return ret;
 	}
-	return error;
+
+	return 0;
 }
 /**
  * drm_fb_helper_restore_fbdev_mode - restore fbdev configuration
@@ -342,14 +413,26 @@ static bool drm_fb_helper_restore_fbdev_mode(struct drm_fb_helper *fb_helper)
  * This should be called from driver's drm ->lastclose callback
  * when implementing an fbcon on top of kms using this helper. This ensures that
  * the user isn't greeted with a black screen when e.g. X dies.
+ *
+ * RETURNS:
+ * Zero if everything went ok, negative error code otherwise.
  */
-bool drm_fb_helper_restore_fbdev_mode_unlocked(struct drm_fb_helper *fb_helper)
+int drm_fb_helper_restore_fbdev_mode_unlocked(struct drm_fb_helper *fb_helper)
 {
 	struct drm_device *dev = fb_helper->dev;
-	bool ret;
+	bool do_delayed;
+	int ret;
+
 	drm_modeset_lock_all(dev);
 	ret = restore_fbdev_mode(fb_helper);
+
+	do_delayed = fb_helper->delayed_hotplug;
+	if (do_delayed)
+		fb_helper->delayed_hotplug = false;
 	drm_modeset_unlock_all(dev);
+
+	if (do_delayed)
+		drm_fb_helper_hotplug_event(fb_helper);
 	return ret;
 }
 EXPORT_SYMBOL(drm_fb_helper_restore_fbdev_mode_unlocked);
@@ -611,6 +694,8 @@ int drm_fb_helper_init(struct drm_device *dev,
 		fb_helper->crtc_info[i].mode_set.crtc = crtc;
 		i++;
 	}
+
+	fb_helper->atomic = !!drm_core_check_feature(dev, DRIVER_ATOMIC);
 
 	return 0;
 out_free:
@@ -1102,10 +1187,6 @@ int drm_fb_helper_set_par(struct fb_info *info)
 
 	drm_fb_helper_restore_fbdev_mode_unlocked(fb_helper);
 
-	if (fb_helper->delayed_hotplug) {
-		fb_helper->delayed_hotplug = false;
-		drm_fb_helper_hotplug_event(fb_helper);
-	}
 	return 0;
 }
 EXPORT_SYMBOL(drm_fb_helper_set_par);

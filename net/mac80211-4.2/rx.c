@@ -33,6 +33,10 @@
 #include "rate.h"
 #include "debugfs_sta.h"
 
+#ifdef CONFIG_MAC80211_PACKET_TRACE
+#include "packet_trace.h"
+#endif
+
 static inline void ieee80211_rx_stats(struct net_device *dev, u32 len)
 {
 	struct pcpu_sw_netstats *tstats = this_cpu_ptr(dev->tstats);
@@ -1547,8 +1551,21 @@ ieee80211_rx_h_decrypt(struct ieee80211_rx_data *rx)
 		if (mmie_keyidx < NUM_DEFAULT_KEYS ||
 		    mmie_keyidx >= NUM_DEFAULT_KEYS + NUM_DEFAULT_MGMT_KEYS)
 			return RX_DROP_MONITOR; /* unexpected BIP keyidx */
-		if (rx->sta)
+		if (rx->sta) {
+#ifdef WAR30087845
+			/* b:30087845 - allow receiver side to accept both
+			 * encrypted and unencrypted frames to allow
+			 * compatibility for limited time so we can safely
+			 * upgrade units. Intended to be reverted once upgrade
+			 * fully deployed.
+			 */
+			if (ieee80211_is_group_privacy_action(skb) &&
+			    test_sta_flag(rx->sta, WLAN_STA_MFP))
+				return RX_DROP_MONITOR;
+#endif
+
 			rx->key = rcu_dereference(rx->sta->gtk[mmie_keyidx]);
+		}
 		if (!rx->key)
 			rx->key = rcu_dereference(rx->sdata->keys[mmie_keyidx]);
 	} else if (!ieee80211_has_protected(fc)) {
@@ -1620,8 +1637,13 @@ ieee80211_rx_h_decrypt(struct ieee80211_rx_data *rx)
 		}
 
 		/* check per-station GTK first, if multicast packet */
-		if (is_multicast_ether_addr(hdr->addr1) && rx->sta)
+		if (is_multicast_ether_addr(hdr->addr1) && rx->sta) {
 			rx->key = rcu_dereference(rx->sta->gtk[keyidx]);
+			/* WAR for chrome-os-partner:55285 */
+			if (ieee80211_vif_is_mesh(&rx->sdata->vif) &&
+			    ieee80211_is_action(hdr->frame_control))
+				status->flag &= ~RX_FLAG_DECRYPTED;
+		}
 
 		/* if not found, try default key */
 		if (!rx->key) {
@@ -2260,6 +2282,7 @@ ieee80211_rx_h_mesh_fwding(struct ieee80211_rx_data *rx)
 				memcpy(mppath->mpp, mpp_addr, ETH_ALEN);
 				mpp_table_updated = 1;
 			}
+			mppath->exp_time = jiffies;
 			spin_unlock_bh(&mppath->state_lock);
 			rcu_read_unlock();
 			if (mpp_table_updated) {
@@ -3131,12 +3154,22 @@ static void ieee80211_rx_handlers(struct ieee80211_rx_data *rx,
 	ieee80211_rx_result res = RX_DROP_MONITOR;
 	struct sk_buff *skb;
 
+#ifdef CONFIG_MAC80211_PACKET_TRACE
+#define CALL_RXH(rxh)			\
+	do {                            \
+		res = rxh(rx);          \
+		PACKET_TRACE_RX_DBG(rx, res, " %s", #rxh);	\
+		if (res != RX_CONTINUE)	\
+			goto rxh_next;  \
+	} while (0);
+#else
 #define CALL_RXH(rxh)			\
 	do {				\
 		res = rxh(rx);		\
 		if (res != RX_CONTINUE)	\
 			goto rxh_next;  \
 	} while (0);
+#endif
 
 	/* Lock here to avoid hitting all of the data used in the RX
 	 * path (e.g. key data, station data, ...) concurrently when
@@ -3195,12 +3228,22 @@ static void ieee80211_invoke_rx_handlers(struct ieee80211_rx_data *rx)
 
 	__skb_queue_head_init(&reorder_release);
 
+#ifdef CONFIG_MAC80211_PACKET_TRACE
+#define CALL_RXH(rxh)			\
+	do {                            \
+		res = rxh(rx);          \
+		PACKET_TRACE_RX_DBG(rx, res, " %s", #rxh);	\
+		if (res != RX_CONTINUE)	\
+			goto rxh_next;  \
+	} while (0);
+#else
 #define CALL_RXH(rxh)			\
 	do {				\
 		res = rxh(rx);		\
 		if (res != RX_CONTINUE)	\
 			goto rxh_next;  \
 	} while (0);
+#endif
 
 	CALL_RXH(ieee80211_rx_h_check_dup)
 	CALL_RXH(ieee80211_rx_h_check)
@@ -3381,6 +3424,10 @@ static bool ieee80211_prepare_and_rx_handle(struct ieee80211_rx_data *rx,
 	struct ieee80211_sub_if_data *sdata = rx->sdata;
 
 	rx->skb = skb;
+
+#ifdef CONFIG_MAC80211_PACKET_TRACE
+	PACKET_TRACE_SET_RX_STATUS(local, rx->sta, skb);
+#endif
 
 	if (!ieee80211_accept_frame(rx))
 		return false;

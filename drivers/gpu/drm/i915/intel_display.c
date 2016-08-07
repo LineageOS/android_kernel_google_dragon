@@ -11311,8 +11311,10 @@ static int intel_crtc_page_flip(struct drm_crtc *crtc,
 		return -EBUSY;
 
 	/* Can't change pixel format via MI display flips. */
-	if (fb->pixel_format != crtc->primary->fb->pixel_format)
+	if (fb->pixel_format != crtc->primary->fb->pixel_format) {
+		atomic_inc(&intel_crtc->error_count);
 		return -EINVAL;
+	}
 
 	/*
 	 * TILEOFF/LINOFF registers can't be changed via MI display flips.
@@ -11320,15 +11322,19 @@ static int intel_crtc_page_flip(struct drm_crtc *crtc,
 	 */
 	if (INTEL_INFO(dev)->gen > 3 &&
 	    (fb->offsets[0] != crtc->primary->fb->offsets[0] ||
-	     fb->pitches[0] != crtc->primary->fb->pitches[0]))
+	     fb->pitches[0] != crtc->primary->fb->pitches[0])) {
+		atomic_inc(&intel_crtc->error_count);
 		return -EINVAL;
+	}
 
 	if (i915_terminally_wedged(&dev_priv->gpu_error))
 		goto out_hang;
 
 	work = kzalloc(sizeof(*work), GFP_KERNEL);
-	if (work == NULL)
+	if (work == NULL) {
+		atomic_inc(&intel_crtc->error_count);
 		return -ENOMEM;
+	}
 
 	work->event = event;
 	work->crtc = crtc;
@@ -11354,6 +11360,7 @@ static int intel_crtc_page_flip(struct drm_crtc *crtc,
 
 			drm_crtc_vblank_put(crtc);
 			kfree(work);
+			atomic_inc(&intel_crtc->error_count);
 			return -EBUSY;
 		}
 	}
@@ -11512,6 +11519,7 @@ retry:
 			spin_unlock_irq(&dev->event_lock);
 		}
 	}
+	atomic_inc(&intel_crtc->error_count);
 	return ret;
 }
 
@@ -13523,6 +13531,7 @@ intel_check_primary_plane(struct drm_plane *plane,
 
 	return drm_plane_helper_check_update(plane, crtc, fb, &state->src,
 					     &state->dst, &state->clip,
+					     state->base.rotation,
 					     min_scale, max_scale,
 					     can_position, true,
 					     &state->visible);
@@ -13707,6 +13716,7 @@ intel_check_cursor_plane(struct drm_plane *plane,
 
 	ret = drm_plane_helper_check_update(plane, crtc, fb, &state->src,
 					    &state->dst, &state->clip,
+					    state->base.rotation,
 					    DRM_PLANE_HELPER_NO_SCALING,
 					    DRM_PLANE_HELPER_NO_SCALING,
 					    true, true, &state->visible);
